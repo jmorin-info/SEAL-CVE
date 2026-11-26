@@ -6,6 +6,8 @@
   "ConserverJours": 120,
   "Serveurs": [
     { "Nom": "BX-SEAL-OMEGA", "Actif": true, "Note": "SEAL 45.0" },
-    { "Nom": "BX-QA-SEAL-VM", "Actif": false, "Note": "compte ordinateur désactivé dans l'AD (26/11/2026)" }
+    { "Nom": "BX-QA-SEAL-VM", "Actif": false, "Note": "compte ordinateur désactivé dans l'AD (26/11/2026)" },
+    { "Nom": "VM-DEV-CENTRAL4", "Actif": true, "Note": "serveur de développement (10.33.60.15)" },
+    { "Nom": "BX-QA-TEST-VM", "Actif": true, "Note": "QA (10.33.120.253)" }
   ]
 }
