@@ -9,3 +9,9 @@ Sauvegardes/
 CSE-*
 *.cred.xml
 *.clixml
+
+# Exécution planifiée (propre à chaque déploiement)
+planification.json
+etat.json
+Journaux/
+SUSPENDRE-MAILS

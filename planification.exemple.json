@@ -1,0 +1,11 @@
+{
+  "_commentaire": "Copier en planification.json à côté de Invoke-SealCvePlanifie.ps1. Depot = dossier local du partage de collecte (OMS-Postes$) où les serveurs SEAL déposent leur inventaire.",
+  "Depot": "C:\\DC\\Collecte\\Postes\\SEAL-CVE",
+  "Destinataires": ["informatique@omnitech-security.fr"],
+  "AlerteQuotidienne": true,
+  "ConserverJours": 120,
+  "Serveurs": [
+    { "Nom": "BX-SEAL-OMEGA", "Actif": true, "Note": "SEAL 45.0" },
+    { "Nom": "BX-QA-SEAL-VM", "Actif": false, "Note": "compte ordinateur désactivé dans l'AD (26/11/2026)" }
+  ]
+}

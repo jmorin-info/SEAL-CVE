@@ -5,7 +5,7 @@ publiées pour chaque version et produit, avec **les mêmes règles pour toutes 
 
 - des données CSV / JSON (source unique de tous les indicateurs) ;
 - un rapport HTML interactif (filtre, liens NVD, couverture, diagnostics) ;
-- une **synthèse PowerPoint** (12 à 16 diapositives) et des **annexes PowerPoint** (tableaux complets).
+- une **synthèse PowerPoint** (10 à 16 diapositives) et des **annexes PowerPoint** (tableaux complets), générées sans Office.
 
 Compatible Windows PowerShell 5.1 et PowerShell 7. Les scripts sont signés (certificat interne « ADM - Julien Morin »).
 
@@ -15,7 +15,9 @@ Compatible Windows PowerShell 5.1 et PowerShell 7. Les scripts sont signés (cer
 |---|---|
 | `README.md` | Ce mode d'emploi |
 | `Get-SealCveReport.ps1` | Moteur : collecte, recherche des CVE, classement, rapports, consolidation |
-| `New-SealCvePresentation.ps1` | Synthèse et annexes PowerPoint (poste avec PowerPoint) |
+| `New-SealCvePresentation.ps1` | Synthèse et annexes PowerPoint, écrites directement (aucun Office requis) |
+| `Invoke-SealCvePlanifie.ps1` | Orchestration planifiée sur le DC : analyse quotidienne, rapport hebdomadaire par mail |
+| `planification.exemple.json` | Modèle de configuration de la planification (serveurs, dépôt, destinataires) |
 | `Signer-SealProjet.ps1` | Signature des scripts sur le serveur de signature après modification |
 | `Livraison\<version>` | Exports de build par version (Dependencies.zip, Licences.zip), non versionnés |
 | `Rapports\SEAL_<version>_<source>\<date>` | Rapports horodatés (un dossier par exécution), non versionnés |
@@ -96,6 +98,30 @@ générateur PowerPoint les recontrôle et refuse de produire une présentation 
 | `controles.csv`, `diagnostic.csv`, `sources.csv` | Contrôles de cohérence, diagnostics, état des référentiels |
 | `cve-disparues.csv` | Constats disparus depuis le rapport précédent comparable |
 | `rapport.html`, `*_synthese.pptx`, `*_annexes.pptx` | Restitutions |
+
+## Planification (serveurs SEAL et contrôleur de domaine)
+
+```
+ Serveur SEAL (tâche « OMS - SEAL CVE collecte (quotidien) », 05:30, compte Système)
+   Get-SealCveReport.ps1 -Installation -InventaireSeul -Depot \BX-AD-01-IT-VM\OMS-Postes$\SEAL-CVE
+        │  inventaire_<date>.json
+        ▼
+ DC  C:\DC\Applications\SEAL-CVE
+   « OMS - SEAL CVE analyse (quotidien) »  07:15  Invoke-SealCvePlanifie.ps1 -Mode Quotidien
+        analyse de chaque nouvel inventaire ; mail d'alerte seulement si nouveau constat critique ou KEV
+   « OMS - SEAL CVE rapport (hebdo) »      lundi 07:40  Invoke-SealCvePlanifie.ps1 -Mode Hebdo
+        synthèse + annexes PowerPoint du dernier rapport de chaque serveur, envoyées aux destinataires
+```
+
+- Les serveurs SEAL déposent eux-mêmes leur inventaire (le DC n'a pas besoin d'accès WinRM aux serveurs) ; les
+  tâches exigent des scripts signés (`-ExecutionPolicy AllSigned`).
+- `planification.json` (copie de `planification.exemple.json`) : dossier de dépôt, destinataires, serveurs actifs,
+  alerte quotidienne, conservation des rapports. Un fichier `SUSPENDRE-MAILS` dans le dossier suspend les envois.
+- Mails : module commun `C:\DC\Scripts\_Commun\OMS-ReportCommon.ps1` (charte et relais SMTP du DC) ; copie
+  archivée dans `C:\DC\Rapports`. Journaux : `Journaux\` (90 jours). Clé NVD : secret DPAPI déjà présent sur le DC.
+- Un inventaire non reçu depuis 48 h et un serveur désactivé sont signalés dans le mail hebdomadaire.
+- Ajouter un serveur : copier `Get-SealCveReport.ps1` dans `C:\ProgramData\OMNITECH\SEAL-CVE` du serveur,
+  créer la tâche de collecte (même commande), puis l'ajouter à `planification.json`.
 
 ## Sources
 

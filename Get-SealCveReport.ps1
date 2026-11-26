@@ -33,6 +33,9 @@
   .\Get-SealCveReport.ps1 -Inventaire '.\inventaire.json' -Presentation
 .EXAMPLE
   .\Get-SealCveReport.ps1 -Consolider
+.EXAMPLE
+  # tâche planifiée d'un serveur SEAL : collecte seule et dépôt sur le partage de collecte du DC
+  .\Get-SealCveReport.ps1 -Installation -InventaireSeul -Depot '\\BX-AD-01-IT-VM\OMS-Postes$\SEAL-CVE' -ConserverJours 30
 #>
 [CmdletBinding(DefaultParameterSetName = 'Installation')]
 param(
@@ -51,6 +54,8 @@ param(
   [string]$Sortie,
   [string]$Cache,
   [string]$NvdApiKey,
+  [string]$Depot,                              # copie l'inventaire.json dans <Depot>\<MACHINE>\ (collecte planifiée vers le DC)
+  [int]$ConserverJours = 0,                    # supprime les rapports datés plus anciens (0 = tout conserver)
   [string]$MotifDossiers = '^(SEAL|Omnitech)',
   [switch]$SansRechercheDisques,
   [string]$ExclureDossiers = '\\(SealInstaller|Backups?|Updates?|Tmp|Temp|Installation|Logs?|Sauvegardes|Rapports|Cache)\\'
@@ -761,6 +766,18 @@ $precedent = Get-ChildItem $racine -Directory -ErrorAction SilentlyContinue | Wh
 $dest = Join-Path $racine (Get-Date -Format 'yyyy-MM-dd_HHmm')
 New-Item -ItemType Directory -Force $dest | Out-Null
 Ecrire-Json (Join-Path $dest 'inventaire.json') ([pscustomobject]@{ VersionSchema = $MoteurVersion; VersionSeal = $ver; Meta = $meta; Composants = $Inv; Exports = $Exports; RuntimesRequis = $RuntimesRequis })
+if ($ConserverJours -gt 0) {   # rétention des rapports datés de cette version / source
+  Get-ChildItem $racine -Directory | Where-Object { $_.FullName -ne $dest -and $_.Name -match '^\d{4}-\d{2}-\d{2}_\d{4}$' -and $_.LastWriteTime -lt (Get-Date).AddDays(-$ConserverJours) } | ForEach-Object { Remove-Item $_.FullName -Recurse -Force; Log "  rétention : $($_.Name) supprimé" }
+}
+if ($Depot) {
+  try {
+    $cible = Join-Path $Depot $(if ($meta.Machine) { $meta.Machine } else { 'livraison_' + (Nom-Fichier $ver) })
+    New-Item -ItemType Directory -Force $cible | Out-Null
+    Copy-Item (Join-Path $dest 'inventaire.json') (Join-Path $cible ("inventaire_$(Get-Date -Format 'yyyyMMdd_HHmm').json"))
+    Get-ChildItem $cible -Filter 'inventaire_*.json' | Sort-Object Name -Descending | Select-Object -Skip 30 | Remove-Item -Force
+    Log "Inventaire déposé : $cible"
+  } catch { Log "ÉCHEC du dépôt de l'inventaire vers $Depot : $($_.Exception.Message)"; if ($InventaireSeul) { exit 2 } }
+}
 if ($InventaireSeul) { Log "Inventaire seul : $(Join-Path $dest 'inventaire.json') ($($Inv.Count) entrées). Analyse : .\Get-SealCveReport.ps1 -Inventaire <ce fichier>"; return }
 [void](Analyser $ver $dest $meta $(if ($precedent) { $precedent.FullName } else { '' }))
 if ($Presentation) {
@@ -777,11 +794,12 @@ $dest
 
 
 
+
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBGebGgPfic7mMq
-# vS7zIcpMdJya/8sghjSlwUCh7PXknKCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC/cf0dOH24F66j
+# KazCWMaMNUF5OV+qJSMXDSo1sk3ne6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -821,12 +839,12 @@ $dest
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg3/QuIYI0PWpEUZp8jgoBtd9e
-# 36DzHx1TbZwa2TwM0P4wDQYJKoZIhvcNAQEBBQAEggEAV4NqLWjnQ/sqsxIZnPdR
-# vPxXTjTB80IHgNSZ4B1qUg3DGpCibWqFm0UHHWepBgbXHKv+BqGFl00vaDjxGBIO
-# LouW9kbAjTkhplfecCwGhzGJl5Ms55bdHe8Ag+6mc/XfSRtk83DyciXEAdzC2kAf
-# hqVhimAbtIP7uJLgu7S0IRtXlsXUWZuNgNJJR+mDQ4GNb9QFK4vOy7DuhWHikcit
-# FQjiH0pLuAZTnUh/3VqB/Krlu6tnf+FVsq65W4WmshjNDfUWi1D+H8Y8PYUNmYph
-# H6QhtHRVm1e4AoOerSSQpKbQHWQGh1ltoVY8S1k3m5WTtY2knz4OVwVoE9ZEY5QH
-# DQ==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgFU+FUkSCTZmX5BzrPiifz9Q0
+# IKfe5udEMBI/cmILE6cwDQYJKoZIhvcNAQEBBQAEggEAMCdUSdJB9dp6cGXuOi/+
+# orjLjPoSqKOMxc/2Na6VVNpfLdt70rLdEiUdEMUcI0fAZXlMTALzc8Uk/wjuaje8
+# I68kE9UwI/F253XKOHeKWpe3XFZUFmUoj7Q3VateBrKVAjQoTri/k/8Xs+g3aXf9
+# m6+0ZGxn88/4PSTzKN5jKFhTdTMe8Lp3z9NNoubjUyqIjwvhW7tQa9n/03RdjlCV
+# cLzmJ8tEu/1MgepLgjn6itgzVzngaI+fLPazto1AwOWozgvmoRmII6W1bPbyyFGK
+# MmHU1feV1GiW122Ke0VoqjXX7RKfnLdyjcBXLiIPfymMF8Gk5j2S/zfmOMCuTmjM
+# Tw==
 # SIG # End signature block

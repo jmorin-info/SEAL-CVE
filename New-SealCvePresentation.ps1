@@ -4,7 +4,8 @@
   Get-SealCveReport.ps1 (moteur 3.0).
 
 .DESCRIPTION
-  À lancer sur un poste où Microsoft PowerPoint est installé (pilotage COM). Un seul modèle pour toutes les versions :
+  Écrit directement les fichiers .pptx (Open XML) : aucun Office requis, utilisable sur un serveur ou dans une tâche
+  planifiée. Un seul modèle pour toutes les versions :
     <rapport>\SEAL_<version>_CVE_<date>_synthese.pptx   12 à 16 diapositives : synthèse, couverture, dépendances SEAL
                                                          par mois, priorités, environnement, à confirmer, plan d'action
     <rapport>\SEAL_<version>_CVE_<date>_annexes.pptx    tableaux complets : un constat par ligne, corrections KB,
@@ -68,87 +69,163 @@ if ($Constats.Count -ne [int]$Resume.Constats) { $ecarts.Add("Total : $($Constat
 if (-not $Resume.ControlesOK) { $ecarts.Add('Contrôles du moteur en échec (controles.csv)') }
 if ($ecarts.Count) { if ($Forcer) { $ecarts | ForEach-Object { Log "ÉCART : $_" } } else { throw ("Compteurs incohérents, présentation non générée :`n - " + ($ecarts -join "`n - ")) } }
 
-# ------------------------------------------------------------------------------------------- PowerPoint (COM)
-function Rgb([string]$h) { [int]([Convert]::ToInt32($h.Substring(0, 2), 16) + 256 * [Convert]::ToInt32($h.Substring(2, 2), 16) + 65536 * [Convert]::ToInt32($h.Substring(4, 2), 16)) }
+# ------------------------------------------------------------------------------------------- PowerPoint (Open XML, sans Office)
+# Le fichier .pptx est écrit directement (ZIP + XML) : aucun Office requis, utilisable sur un serveur ou une tâche planifiée.
+# Coordonnées en points (diapositive 960 × 540 pt, 16:9) ; 1 pt = 12 700 EMU.
+Add-Type -AssemblyName System.IO.Compression
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+Add-Type -AssemblyName System.Drawing
 $Navy = '14213D'; $CoulTexte = '1B2430'; $Gris = '8A94A0'; $Fond = 'EEF1F5'; $Lien = '1F5FA8'; $Blanc = 'FFFFFF'; $Orange = 'D9480F'; $Rouge = 'B3261E'; $Bleu = '3B5B8C'
-try { $pp = New-Object -ComObject PowerPoint.Application } catch { throw 'PowerPoint n''est pas installé sur ce poste : lancer ce script sur un poste avec Office.' }
-$script:pres = $null
-trap { if ($script:pres) { try { $script:pres.Close() } catch {} }; if ($pp -and $pp.Presentations.Count -eq 0) { try { $pp.Quit() } catch {} }; break }
-
-function Nouvelle-Presentation { $script:pres = $pp.Presentations.Add($false); $script:pres.PageSetup.SlideWidth = 960; $script:pres.PageSetup.SlideHeight = 540; $script:n = 0 }
-function Texte($sl, [string]$t, $x, $y, $w, $h, $taille = 14, [switch]$Gras, $coul = $CoulTexte, $align = 1, $police = 'Calibri', [switch]$Italique) {
-  $s = $sl.Shapes.AddTextbox(1, [single]$x, [single]$y, [single]$w, [single]$h); $tf = $s.TextFrame; $tf.WordWrap = -1; $tf.AutoSize = 0
-  $tf.MarginLeft = 0; $tf.MarginRight = 0; $tf.MarginTop = 0; $tf.MarginBottom = 0
-  $r = $tf.TextRange; $r.Text = $t; $r.Font.Name = $police; $r.Font.Size = [single]$taille; $r.Font.Bold = $(if ($Gras) { -1 } else { 0 }); $r.Font.Italic = $(if ($Italique) { -1 } else { 0 })
-  $r.Font.Color.RGB = (Rgb $coul); $r.ParagraphFormat.Alignment = $align; $s
+function X([string]$s) { [Security.SecurityElement]::Escape(($s -replace '[\x00-\x08\x0B\x0C\x0E-\x1F]', '')) }
+function Emu($pt) { [long][math]::Round([double]$pt * 12700) }
+$script:gfx = [Drawing.Graphics]::FromImage((New-Object Drawing.Bitmap 1, 1)); $script:gfx.PageUnit = [Drawing.GraphicsUnit]::Point
+$script:polices = @{}
+# Hauteur (pt) occupée par un texte dans une largeur donnée : sert à empiler les blocs comme le faisait l'ajustement automatique
+function Mesurer([string]$t, $largeur, $taille, [bool]$gras = $false, [string]$police = 'Calibri') {
+  if (-not $t) { return 0 }
+  $k = "$police|$taille|$gras"
+  if (-not $script:polices.ContainsKey($k)) { $script:polices[$k] = New-Object Drawing.Font($police, [single]$taille, $(if ($gras) { [Drawing.FontStyle]::Bold } else { [Drawing.FontStyle]::Regular }), [Drawing.GraphicsUnit]::Point) }
+  $h = 0.0
+  foreach ($ligne in ($t -split "`r`n|`r|`n")) { $h += [math]::Max([double]$taille * 1.2, $script:gfx.MeasureString($(if ($ligne) { $ligne } else { ' ' }), $script:polices[$k], [int]$largeur).Height) }
+  $h
 }
-# Titre de paragraphe en gras + corps, hauteur ajustée au texte ; renvoie la hauteur occupée
+function Nouvelle-Presentation { $script:slides = New-Object Collections.Generic.List[object]; $script:n = 0 }
+function Nouvel-Id { $script:idForme++; $script:idForme }
+$script:idForme = 1
+# Une portion de texte (run) ; un lien ajoute une relation à la diapositive
+function Run($sl, [string]$t, $taille, [bool]$gras = $false, [string]$coul = $CoulTexte, [string]$police = 'Calibri', [bool]$ital = $false, [string]$lien = '') {
+  $lk = ''; $u = ''
+  if ($lien) { $rid = "rIdL$($sl.Liens.Count + 1)"; $sl.Liens.Add([pscustomobject]@{ Id = $rid; Cible = $lien }); $lk = "<a:hlinkClick r:id=""$rid""/>"; $u = ' u="sng"' }
+  "<a:r><a:rPr lang=""fr-FR"" sz=""$([int]([double]$taille * 100))""$(if ($gras) { ' b="1"' })$(if ($ital) { ' i="1"' })$u dirty=""0""><a:solidFill><a:srgbClr val=""$coul""/></a:solidFill><a:latin typeface=""$police""/><a:cs typeface=""$police""/>$lk</a:rPr><a:t>$(X $t)</a:t></a:r>"
+}
+function Para([string]$runs, [string]$algn = 'l', $taille = 12) { "<a:p><a:pPr algn=""$algn""><a:spcBef><a:spcPts val=""0""/></a:spcBef><a:spcAft><a:spcPts val=""0""/></a:spcAft></a:pPr>$runs<a:endParaRPr lang=""fr-FR"" sz=""$([int]([double]$taille * 100))"" dirty=""0""/></a:p>" }
+function Algn($a) { switch ([int]$a) { 2 { 'ctr' } 3 { 'r' } default { 'l' } } }
+function Xfrm($x, $y, $w, $h) { "<a:xfrm><a:off x=""$(Emu $x)"" y=""$(Emu $y)""/><a:ext cx=""$(Emu $w)"" cy=""$(Emu $h)""/></a:xfrm>" }
+# Zone de texte : paragraphes = tableau de @{ T; Taille; Gras; Coul; Police; Ital }
+function TexteRiche($sl, $paras, $x, $y, $w, $h, $align = 1, [string]$ancre = 't') {
+  $id = Nouvel-Id
+  $p = (@($paras | ForEach-Object { $q = $_; Para (Run $sl "$($q.T)" $q.Taille ([bool]$q.Gras) $(if ($q.Coul) { $q.Coul } else { $CoulTexte }) $(if ($q.Police) { $q.Police } else { 'Calibri' }) ([bool]$q.Ital)) (Algn $align) $q.Taille })) -join ''
+  [void]$sl.Xml.Append("<p:sp><p:nvSpPr><p:cNvPr id=""$id"" name=""Texte $id""/><p:cNvSpPr txBox=""1""/><p:nvPr/></p:nvSpPr><p:spPr>$(Xfrm $x $y $w $h)<a:prstGeom prst=""rect""><a:avLst/></a:prstGeom><a:noFill/></p:spPr><p:txBody><a:bodyPr wrap=""square"" lIns=""0"" tIns=""0"" rIns=""0"" bIns=""0"" anchor=""$ancre""><a:noAutofit/></a:bodyPr><a:lstStyle/>$p</p:txBody></p:sp>")
+}
+function Texte($sl, [string]$t, $x, $y, $w, $h, $taille = 14, [switch]$Gras, $coul = $CoulTexte, $align = 1, $police = 'Calibri', [switch]$Italique) {
+  $paras = @($t -split "`r`n|`r|`n" | ForEach-Object { @{ T = $_; Taille = $taille; Gras = [bool]$Gras; Coul = $coul; Police = $police; Ital = [bool]$Italique } })
+  TexteRiche $sl $paras $x $y $w $h $align
+}
+# Titre de paragraphe en gras + corps ; renvoie la hauteur occupée
 function Bloc($sl, [string]$titre, [string]$corps, $x, $y, $w, $coulTitre = $Navy, $taille = 13) {
-  $s = Texte $sl '' $x $y $w 40 $taille
-  $s.TextFrame.TextRange.Text = $(if ($corps) { "$titre`r$corps" } else { $titre })
-  $p1 = $s.TextFrame.TextRange.Paragraphs(1); $p1.Font.Bold = -1; $p1.Font.Size = [single]($taille + 1); $p1.Font.Color.RGB = (Rgb $coulTitre)
-  $s.TextFrame.AutoSize = 1; $s.Height
+  $paras = @(@{ T = $titre; Taille = $taille + 1; Gras = $true; Coul = $coulTitre }) + @(if ($corps) { $corps -split "`r`n|`r|`n" | ForEach-Object { @{ T = $_; Taille = $taille } } })
+  $h = (Mesurer $titre $w ($taille + 1) $true) + (Mesurer $corps $w $taille)
+  TexteRiche $sl $paras $x $y $w $h
+  $h
+}
+function Forme($sl, [string]$geom, $x, $y, $w, $h, [string]$coul, [string]$texte = '', $taille = 16, [string]$adj = '') {
+  $id = Nouvel-Id
+  $av = if ($adj) { "<a:avLst><a:gd name=""adj"" fmla=""val $adj""/></a:avLst>" } else { '<a:avLst/>' }
+  $tx = if ($texte) { "<p:txBody><a:bodyPr lIns=""0"" tIns=""0"" rIns=""0"" bIns=""0"" anchor=""ctr""/><a:lstStyle/>$(Para (Run $sl $texte $taille $true $Blanc) 'ctr' $taille)</p:txBody>" } else { '' }
+  [void]$sl.Xml.Append("<p:sp><p:nvSpPr><p:cNvPr id=""$id"" name=""Forme $id""/><p:cNvSpPr/><p:nvPr/></p:nvSpPr><p:spPr>$(Xfrm $x $y $w $h)<a:prstGeom prst=""$geom"">$av</a:prstGeom><a:solidFill><a:srgbClr val=""$coul""/></a:solidFill><a:ln><a:noFill/></a:ln></p:spPr>$tx</p:sp>")
+}
+function Boite($sl, $x, $y, $w, $h, $coul = $Fond) { Forme $sl 'roundRect' $x $y $w $h $coul '' 16 '6000' }
+function Rect($sl, $x, $y, $w, $h, $coul) { Forme $sl 'rect' $x $y $w $h $coul }
+function Pastille($sl, $x, $y, $d, $coul, [string]$texte) { Forme $sl 'ellipse' $x $y $d $d $coul $texte 16 }
+function Ligne($sl, $x1, $y1, $x2, $coul) {
+  $id = Nouvel-Id
+  [void]$sl.Xml.Append("<p:cxnSp><p:nvCxnSpPr><p:cNvPr id=""$id"" name=""Ligne $id""/><p:cNvCxnSpPr/><p:nvPr/></p:nvCxnSpPr><p:spPr>$(Xfrm $x1 $y1 ($x2 - $x1) 0)<a:prstGeom prst=""line""><a:avLst/></a:prstGeom><a:ln w=""9525""><a:solidFill><a:srgbClr val=""$coul""/></a:solidFill></a:ln></p:spPr></p:cxnSp>")
 }
 function Diapo([string]$titre, [switch]$Sombre) {
-  $script:n++; $sl = $script:pres.Slides.Add($script:n, 12)
-  $sl.FollowMasterBackground = 0; $sl.Background.Fill.Solid(); $sl.Background.Fill.ForeColor.RGB = (Rgb $(if ($Sombre) { $Navy } else { $Blanc }))
+  $script:n++
+  $sl = [pscustomobject]@{ Xml = New-Object Text.StringBuilder; Liens = New-Object Collections.Generic.List[object]; Fond = $(if ($Sombre) { $Navy } else { $Blanc }) }
+  $script:slides.Add($sl)
   if (-not $Sombre) {
-    [void](Texte $sl $titre 43 22 875 48 28 -Gras $Navy 1 'Cambria')
-    [void](Texte $sl $Pied 43 508 760 16 10 -coul $Gris)
-    [void](Texte $sl "$script:n" 860 508 58 16 10 -coul $Gris -align 3)
+    Texte $sl $titre 43 22 875 48 28 -Gras $Navy 1 'Cambria'
+    Texte $sl $Pied 43 508 760 16 10 -coul $Gris
+    Texte $sl "$script:n" 860 508 58 16 10 -coul $Gris -align 3
   }
   $sl
 }
-function Boite($sl, $x, $y, $w, $h, $coul = $Fond) {
-  $s = $sl.Shapes.AddShape(5, [single]$x, [single]$y, [single]$w, [single]$h); $s.Adjustments.Item(1) = 0.06
-  $s.Fill.ForeColor.RGB = (Rgb $coul); $s.Line.Visible = 0; $s.Shadow.Visible = 0; $s
-}
 # $lignes : tableaux de cellules ; cellule = chaîne ou @{ T = texte; F = fond; C = couleur; B = gras; A = alignement; Liens = @(@(texte,url),…) }
+# La hauteur des lignes (18 pt) est un minimum : PowerPoint l'agrandit à l'ouverture si le texte passe à la ligne.
 function Tableau($sl, [string[]]$entetes, $lignes, $x, $y, [double[]]$largeurs, $taille = 10.5) {
   if (@($lignes).Count -and $lignes[0] -isnot [Collections.IList]) { $lignes = , @($lignes) }   # une seule ligne : PowerShell aplatit le tableau
-  $nl = @($lignes).Count + 1; $nc = $entetes.Count
-  $s = $sl.Shapes.AddTable([int]$nl, [int]$nc, [single]$x, [single]$y, [single](($largeurs | Measure-Object -Sum).Sum), [single](20 * $nl)); $t = $s.Table
-  for ($c = 1; $c -le $nc; $c++) { $t.Columns.Item($c).Width = [single]$largeurs[$c - 1] }
-  for ($r = 1; $r -le $nl; $r++) {
-    for ($c = 1; $c -le $nc; $c++) {
-      $cell = $t.Cell($r, $c); $tf = $cell.Shape.TextFrame; $tf.MarginLeft = 5; $tf.MarginRight = 4; $tf.MarginTop = 2; $tf.MarginBottom = 2; $tf.VerticalAnchor = 3
-      if ($r -eq 1) { $v = @{ T = $entetes[$c - 1]; F = $Navy; C = $Blanc; B = $true } }
-      else { $v = $lignes[$r - 2][$c - 1]; if ($v -isnot [hashtable]) { $v = @{ T = "$v" } } }
+  $id = Nouvel-Id
+  $bord = '<a:solidFill><a:srgbClr val="FFFFFF"/></a:solidFill>'
+  $lnx = (@('lnL', 'lnR', 'lnT', 'lnB') | ForEach-Object { "<a:$_ w=""12700"" cap=""flat"" cmpd=""sng"" algn=""ctr"">$bord<a:prstDash val=""solid""/></a:$_>" }) -join ''
+  $sb = New-Object Text.StringBuilder
+  $toutes = @(, @($entetes | ForEach-Object { @{ T = $_; F = $Navy; C = $Blanc; B = $true } })) + @($lignes)
+  for ($r = 0; $r -lt $toutes.Count; $r++) {
+    [void]$sb.Append("<a:tr h=""$(Emu 18)"">")
+    for ($c = 0; $c -lt $entetes.Count; $c++) {
+      $v = $toutes[$r][$c]; if ($v -isnot [hashtable]) { $v = @{ T = "$v" } }
       $fondCellule = if ($v.F) { $v.F } elseif ($r % 2 -eq 1) { $Fond } else { $Blanc }
-      $cell.Shape.Fill.Solid(); $cell.Shape.Fill.ForeColor.RGB = [int](Rgb $fondCellule)
-      $tr = $tf.TextRange
+      $al = if ($v.A) { Algn $v.A } else { 'l' }
       if ($v.Liens) {
-        $texteCellule = (@($v.Liens | ForEach-Object { $_[0] }) -join ', ') + "$($v.T)"; $tr.Text = $texteCellule
-        $tr.Font.Size = [single]($taille - 1); $tr.Font.Name = 'Calibri'; $tr.Font.Color.RGB = (Rgb $CoulTexte)
-        $pos = 1; foreach ($k in $v.Liens) { $seg = $tr.Characters($pos, $k[0].Length); $seg.ActionSettings.Item(1).Hyperlink.Address = $k[1]; $seg.Font.Color.RGB = (Rgb $Lien); $pos += $k[0].Length + 2 }
-      } else {
-        $tr.Text = "$($v.T)"; $tr.Font.Size = [single]$taille; $tr.Font.Name = 'Calibri'; $tr.Font.Bold = $(if ($v.B) { -1 } else { 0 })
-        $tr.Font.Color.RGB = (Rgb $(if ($v.C) { $v.C } else { $CoulTexte }))
-      }
-      if ($v.A) { $tr.ParagraphFormat.Alignment = $v.A }
+        $runs = New-Object Text.StringBuilder; $i = 0
+        foreach ($k in $v.Liens) { if ($i++) { [void]$runs.Append((Run $sl ', ' ($taille - 1))) }; [void]$runs.Append((Run $sl $k[0] ($taille - 1) $false $Lien 'Calibri' $false $k[1])) }
+        if ($v.T) { [void]$runs.Append((Run $sl "$($v.T)" ($taille - 1) $false $CoulTexte)) }
+        $p = Para $runs.ToString() $al ($taille - 1)
+      } else { $p = Para (Run $sl "$($v.T)" $taille ([bool]$v.B) $(if ($v.C) { $v.C } else { $CoulTexte })) $al $taille }
+      [void]$sb.Append("<a:tc><a:txBody><a:bodyPr/><a:lstStyle/>$p</a:txBody><a:tcPr marL=""63500"" marR=""50800"" marT=""25400"" marB=""25400"" anchor=""ctr"">$lnx<a:solidFill><a:srgbClr val=""$fondCellule""/></a:solidFill></a:tcPr></a:tc>")
     }
-    $t.Rows.Item($r).Height = 18
+    [void]$sb.Append('</a:tr>')
   }
-  $s
+  $grille = (@($largeurs | ForEach-Object { "<a:gridCol w=""$(Emu $_)""/>" }) -join '')
+  $w = ($largeurs | Measure-Object -Sum).Sum
+  [void]$sl.Xml.Append("<p:graphicFrame><p:nvGraphicFramePr><p:cNvPr id=""$id"" name=""Tableau $id""/><p:cNvGraphicFramePr><a:graphicFrameLocks noGrp=""1""/></p:cNvGraphicFramePr><p:nvPr/></p:nvGraphicFramePr><p:xfrm><a:off x=""$(Emu $x)"" y=""$(Emu $y)""/><a:ext cx=""$(Emu $w)"" cy=""$(Emu (18 * $toutes.Count))""/></p:xfrm><a:graphic><a:graphicData uri=""http://schemas.openxmlformats.org/drawingml/2006/table""><a:tbl><a:tblPr firstRow=""1""/><a:tblGrid>$grille</a:tblGrid>$($sb.ToString())</a:tbl></a:graphicData></a:graphic></p:graphicFrame>")
 }
 # Cellule de gravité : score CVSS s'il est connu, sinon « n.r. » (non renseigné) sur la couleur de la gravité publiée
 function CelSev([string]$cvss, [string]$grav) { $g = if ($Sev.Contains($grav)) { $grav } else { 'Non renseignée' }; @{ T = $(if ($cvss) { $cvss } else { 'n.r.' }); F = $Sev[$g]; C = $Blanc; B = $true; A = 2 } }
 function Paquets($liste, [int]$taille) { $p = @(); for ($i = 0; $i -lt @($liste).Count; $i += $taille) { $p += , @($liste[$i..([math]::Min($i + $taille, @($liste).Count) - 1)]) }; , $p }
-# Tableau paginé : un titre, « (suite) » sur les pages suivantes, une note de bas de tableau facultative
 function Tableau-Pagine([string]$titre, [string[]]$entetes, $lignes, [double[]]$largeurs, [int]$parPage, $taille = 10, [string]$note = '') {
   if (-not @($lignes).Count) { return }
   $pages = Paquets $lignes $parPage; $i = 0
   foreach ($pg in $pages) {
     $i++; $sl = Diapo $(if ($pages.Count -gt 1) { "$titre ($i/$($pages.Count))" } else { $titre })
-    [void](Tableau $sl $entetes $pg 43 82 $largeurs $taille)
-    if ($note) { [void](Texte $sl $note 43 486 875 16 10 -coul $Gris -Italique) }
+    Tableau $sl $entetes $pg 43 82 $largeurs $taille
+    if ($note) { Texte $sl $note 43 486 875 16 10 -coul $Gris -Italique }
   }
 }
+# Écriture du paquet .pptx (thème, masque, disposition vierge, diapositives)
 function Enregistrer([string]$suffixe) {
   $f = Join-Path $Rapport ("SEAL_$($Resume.VersionSeal)_CVE_$($genere.ToString('yyyy-MM-dd'))_$suffixe.pptx")
-  $script:pres.SaveAs($f, 24); $script:pres.Close(); $script:pres = $null
+  $ns = 'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"'
+  $grp = '<p:nvGrpSpPr><p:cNvPr id="1" name=""/><p:cNvGrpSpPr/><p:nvPr/></p:nvGrpSpPr><p:grpSpPr><a:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/><a:chOff x="0" y="0"/><a:chExt cx="0" cy="0"/></a:xfrm></p:grpSpPr>'
+  $rel = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+  $e = [ordered]@{}
+  $e['_rels/.rels'] = "<Relationships xmlns=""http://schemas.openxmlformats.org/package/2006/relationships""><Relationship Id=""rId1"" Type=""$rel/officeDocument"" Target=""ppt/presentation.xml""/><Relationship Id=""rId2"" Type=""http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties"" Target=""docProps/core.xml""/><Relationship Id=""rId3"" Type=""$rel/extended-properties"" Target=""docProps/app.xml""/></Relationships>"
+  $d = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+  $e['docProps/core.xml'] = "<cp:coreProperties xmlns:cp=""http://schemas.openxmlformats.org/package/2006/metadata/core-properties"" xmlns:dc=""http://purl.org/dc/elements/1.1/"" xmlns:dcterms=""http://purl.org/dc/terms/"" xmlns:xsi=""http://www.w3.org/2001/XMLSchema-instance""><dc:title>$(X "SEAL $($Resume.VersionSeal) - CVE des dépendances")</dc:title><dc:creator>SEAL CVE</dc:creator><dcterms:created xsi:type=""dcterms:W3CDTF"">$d</dcterms:created><dcterms:modified xsi:type=""dcterms:W3CDTF"">$d</dcterms:modified></cp:coreProperties>"
+  $e['docProps/app.xml'] = "<Properties xmlns=""http://schemas.openxmlformats.org/officeDocument/2006/extended-properties""><Application>SEAL CVE</Application><PresentationFormat>Grand écran</PresentationFormat><Slides>$($script:slides.Count)</Slides></Properties>"
+  $e['ppt/theme/theme1.xml'] = '<a:theme xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" name="SEAL"><a:themeElements><a:clrScheme name="SEAL"><a:dk1><a:srgbClr val="1B2430"/></a:dk1><a:lt1><a:srgbClr val="FFFFFF"/></a:lt1><a:dk2><a:srgbClr val="14213D"/></a:dk2><a:lt2><a:srgbClr val="EEF1F5"/></a:lt2><a:accent1><a:srgbClr val="3B5B8C"/></a:accent1><a:accent2><a:srgbClr val="D9480F"/></a:accent2><a:accent3><a:srgbClr val="B3261E"/></a:accent3><a:accent4><a:srgbClr val="E6A100"/></a:accent4><a:accent5><a:srgbClr val="5C8A2D"/></a:accent5><a:accent6><a:srgbClr val="8A94A0"/></a:accent6><a:hlink><a:srgbClr val="1F5FA8"/></a:hlink><a:folHlink><a:srgbClr val="6B4C9A"/></a:folHlink></a:clrScheme><a:fontScheme name="SEAL"><a:majorFont><a:latin typeface="Cambria"/><a:ea typeface=""/><a:cs typeface=""/></a:majorFont><a:minorFont><a:latin typeface="Calibri"/><a:ea typeface=""/><a:cs typeface=""/></a:minorFont></a:fontScheme><a:fmtScheme name="SEAL"><a:fillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:fillStyleLst><a:lnStyleLst><a:ln w="6350"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="12700"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln><a:ln w="19050"><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:ln></a:lnStyleLst><a:effectStyleLst><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle><a:effectStyle><a:effectLst/></a:effectStyle></a:effectStyleLst><a:bgFillStyleLst><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill><a:solidFill><a:schemeClr val="phClr"/></a:solidFill></a:bgFillStyleLst></a:fmtScheme></a:themeElements></a:theme>'
+  $e['ppt/slideMasters/slideMaster1.xml'] = "<p:sldMaster $ns><p:cSld><p:spTree>$grp</p:spTree></p:cSld><p:clrMap bg1=""lt1"" tx1=""dk1"" bg2=""lt2"" tx2=""dk2"" accent1=""accent1"" accent2=""accent2"" accent3=""accent3"" accent4=""accent4"" accent5=""accent5"" accent6=""accent6"" hlink=""hlink"" folHlink=""folHlink""/><p:sldLayoutIdLst><p:sldLayoutId id=""2147483649"" r:id=""rId1""/></p:sldLayoutIdLst><p:txStyles><p:titleStyle/><p:bodyStyle/><p:otherStyle/></p:txStyles></p:sldMaster>"
+  $e['ppt/slideMasters/_rels/slideMaster1.xml.rels'] = "<Relationships xmlns=""http://schemas.openxmlformats.org/package/2006/relationships""><Relationship Id=""rId1"" Type=""$rel/slideLayout"" Target=""../slideLayouts/slideLayout1.xml""/><Relationship Id=""rId2"" Type=""$rel/theme"" Target=""../theme/theme1.xml""/></Relationships>"
+  $e['ppt/slideLayouts/slideLayout1.xml'] = "<p:sldLayout $ns type=""blank"" preserve=""1""><p:cSld name=""Vierge""><p:spTree>$grp</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sldLayout>"
+  $e['ppt/slideLayouts/_rels/slideLayout1.xml.rels'] = "<Relationships xmlns=""http://schemas.openxmlformats.org/package/2006/relationships""><Relationship Id=""rId1"" Type=""$rel/slideMaster"" Target=""../slideMasters/slideMaster1.xml""/></Relationships>"
+  $ids = New-Object Text.StringBuilder; $prels = New-Object Text.StringBuilder
+  $types = New-Object Text.StringBuilder
+  [void]$types.Append('<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/><Override PartName="/ppt/slideMasters/slideMaster1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideMaster+xml"/><Override PartName="/ppt/slideLayouts/slideLayout1.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.slideLayout+xml"/><Override PartName="/ppt/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/><Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/><Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>')
+  for ($i = 0; $i -lt $script:slides.Count; $i++) {
+    $k = $i + 1; $sl = $script:slides[$i]
+    $e["ppt/slides/slide$k.xml"] = "<p:sld $ns><p:cSld><p:bg><p:bgPr><a:solidFill><a:srgbClr val=""$($sl.Fond)""/></a:solidFill><a:effectLst/></p:bgPr></p:bg><p:spTree>$grp$($sl.Xml.ToString())</p:spTree></p:cSld><p:clrMapOvr><a:masterClrMapping/></p:clrMapOvr></p:sld>"
+    $sr = "<Relationships xmlns=""http://schemas.openxmlformats.org/package/2006/relationships""><Relationship Id=""rIdLayout"" Type=""$rel/slideLayout"" Target=""../slideLayouts/slideLayout1.xml""/>"
+    foreach ($l in $sl.Liens) { $sr += "<Relationship Id=""$($l.Id)"" Type=""$rel/hyperlink"" Target=""$(X $l.Cible)"" TargetMode=""External""/>" }
+    $e["ppt/slides/_rels/slide$k.xml.rels"] = $sr + '</Relationships>'
+    [void]$ids.Append("<p:sldId id=""$(255 + $k)"" r:id=""rIdS$k""/>"); [void]$prels.Append("<Relationship Id=""rIdS$k"" Type=""$rel/slide"" Target=""slides/slide$k.xml""/>")
+    [void]$types.Append("<Override PartName=""/ppt/slides/slide$k.xml"" ContentType=""application/vnd.openxmlformats-officedocument.presentationml.slide+xml""/>")
+  }
+  $e['ppt/presentation.xml'] = "<p:presentation $ns saveSubsetFonts=""1""><p:sldMasterIdLst><p:sldMasterId id=""2147483648"" r:id=""rIdM""/></p:sldMasterIdLst><p:sldIdLst>$($ids.ToString())</p:sldIdLst><p:sldSz cx=""12192000"" cy=""6858000""/><p:notesSz cx=""6858000"" cy=""9144000""/><p:defaultTextStyle/></p:presentation>"
+  $e['ppt/_rels/presentation.xml.rels'] = "<Relationships xmlns=""http://schemas.openxmlformats.org/package/2006/relationships""><Relationship Id=""rIdM"" Type=""$rel/slideMaster"" Target=""slideMasters/slideMaster1.xml""/><Relationship Id=""rIdT"" Type=""$rel/theme"" Target=""theme/theme1.xml""/>$($prels.ToString())</Relationships>"
+  $e['[Content_Types].xml'] = $types.ToString() + '</Types>'
+  $tmp = "$f.tmp"; if (Test-Path $tmp) { Remove-Item $tmp -Force }
+  $zip = [IO.Compression.ZipFile]::Open($tmp, [IO.Compression.ZipArchiveMode]::Create)
+  try {
+    foreach ($nom in @('[Content_Types].xml') + @($e.Keys | Where-Object { $_ -ne '[Content_Types].xml' })) {
+      $w = New-Object IO.StreamWriter(($zip.CreateEntry($nom, [IO.Compression.CompressionLevel]::Optimal)).Open(), (New-Object Text.UTF8Encoding($false)))
+      try { $w.Write('<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' + $e[$nom]) } finally { $w.Dispose() }
+    }
+  } finally { $zip.Dispose() }
+  Move-Item $tmp $f -Force
   Log "Présentation : $f ($script:n diapositives)"; $f
 }
+
 # Ligne de constat (annexes) : mois, CVE cliquable, gravité, composant, version, correction, état ou modules
 function Modules-Courts([string]$m) { $t = @($m -split ', ' | Where-Object { $_ }); if ($t.Count -gt 3) { (($t | Select-Object -First 3) -join ' · ') + " +$($t.Count - 3)" } else { $t -join ' · ' } }
 function Ligne-Constat($l, [string]$derniere) { if ($l.KEV -eq 'OUI') { $derniere = "KEV · $derniere" }; , @($l.Mois, @{ T = ''; Liens = @(, @($l.CVE, $l.Lien)) }, (CelSev $l.CVSS $l.'Gravité'), (Court $l.Composant), $l.'Version installée', $(if ($l.'Version corrigée') { $l.'Version corrigée' } else { '—' }), $derniere) }
@@ -213,21 +290,19 @@ if ($Synthese) {
   $tot = @($mois | ForEach-Object { $m = $_; ($Sev.Keys | ForEach-Object { [int]$par["$m|$_"] } | Measure-Object -Sum).Sum })
   $max = [math]::Max(1, ($tot | Measure-Object -Maximum).Maximum)
   $x0 = 70; $base = 440; $haut = 300; $pas = 50
-  $sl.Shapes.AddLine([single]($x0 - 8), [single]$base, [single]($x0 + 12 * $pas), [single]$base).Line.ForeColor.RGB = (Rgb 'C5CCD6')
+  Ligne $sl ($x0 - 8) $base ($x0 + 12 * $pas) 'C5CCD6'
   for ($i = 0; $i -lt 12; $i++) {
     $y = $base
     foreach ($g in $Sev.Keys) {
       $v = [int]$par["$($mois[$i])|$g"]; if (-not $v) { continue }
-      $h = $haut * $v / $max; $b = $sl.Shapes.AddShape(1, [single]($x0 + $i * $pas), [single]($y - $h), [single]34, [single]$h); $b.Fill.ForeColor.RGB = (Rgb $Sev[$g]); $b.Line.Visible = 0; $y -= $h
+      $h = $haut * $v / $max; Rect $sl ($x0 + $i * $pas) ($y - $h) 34 $h $Sev[$g]; $y -= $h
     }
     if ($tot[$i]) { [void](Texte $sl "$($tot[$i])" ($x0 + $i * $pas - 4) ($y - 18) 42 14 11 -Gras -align 2) }
     [void](Texte $sl ($moisCourt[[int]$mois[$i].Substring(5, 2) - 1] + ' ' + $mois[$i].Substring(2, 2)) ($x0 + $i * $pas - 6) ($base + 6) 46 14 10 -coul '5B6573' -align 2)
   }
-  $lx = 70; foreach ($g in $Sev.Keys) { $b = $sl.Shapes.AddShape(1, [single]$lx, [single]478, [single]10, [single]10); $b.Fill.ForeColor.RGB = (Rgb $Sev[$g]); $b.Line.Visible = 0; [void](Texte $sl $g ($lx + 14) 475 95 14 11); $lx += 110 }
+  $lx = 70; foreach ($g in $Sev.Keys) { Rect $sl $lx 478 10 10 $Sev[$g]; [void](Texte $sl $g ($lx + 14) 475 95 14 11); $lx += 110 }
   $t12 = ($tot | Measure-Object -Sum).Sum; $anciens = @($Seal | Where-Object { $_.Mois -lt $mois[0] }).Count
-  $s = Texte $sl '' 700 110 218 300 13
-  $s.TextFrame.TextRange.Text = "$t12`rconstats publiés sur les 12 derniers mois`r$anciens`rconstats plus anciens, toujours présents dans la version"
-  foreach ($pi in 1, 3) { $p = $s.TextFrame.TextRange.Paragraphs($pi); $p.Font.Size = 36; $p.Font.Bold = -1; $p.Font.Name = 'Cambria'; $p.Font.Color.RGB = (Rgb $(if ($pi -eq 1) { $Orange } else { $Navy })) }
+  TexteRiche $sl @(@{ T = "$t12"; Taille = 36; Gras = $true; Police = 'Cambria'; Coul = $Orange }, @{ T = 'constats publiés sur les 12 derniers mois'; Taille = 13 }, @{ T = "$anciens"; Taille = 36; Gras = $true; Police = 'Cambria'; Coul = $Navy }, @{ T = 'constats plus anciens, toujours présents dans la version'; Taille = 13 }) 700 110 218 300
   if ($Pc.'Dépendance SEAL'.Constats -and (@($Seal | Where-Object { -not $_.CVSS }).Count)) { [void](Texte $sl "$(@($Seal | Where-Object { -not $_.CVSS }).Count) constat(s) sans score CVSS publié : gravité reprise de l'avis (« Non renseignée » si absente)." 700 420 218 50 10 -coul $Gris -Italique) }
 
   # ---- 5+. détail mensuel des dépendances SEAL (mois × composant)
@@ -334,8 +409,7 @@ if ($Synthese) {
   $y = 85
   for ($k = 0; $k -lt [math]::Min(6, $acts.Count); $k++) {
     $a = $acts[$k]
-    $o = $sl.Shapes.AddShape(9, [single]43, [single]($y + 4), [single]34, [single]34); $o.Fill.ForeColor.RGB = (Rgb $a[2]); $o.Line.Visible = 0
-    $o.TextFrame.TextRange.Text = "$($k + 1)"; $o.TextFrame.TextRange.Font.Size = 16; $o.TextFrame.TextRange.Font.Bold = -1; $o.TextFrame.TextRange.Font.Color.RGB = (Rgb $Blanc)
+    Pastille $sl 43 ($y + 4) 34 $a[2] "$($k + 1)"
     $y += [math]::Max(52, (Bloc $sl $a[0] $a[1] 92 $y 826 $Navy 13) + 14)
   }
 
@@ -368,17 +442,17 @@ if ($Annexes) {
   Tableau-Pagine "G. Diagnostics : $($Diags.Count)" @('Niveau', 'Source', 'Message') @($Diags | ForEach-Object { , @($_.Niveau, $_.Source, $_.Message) }) @(70, 230, 575) 17 9.5
   $fichiers += Enregistrer 'annexes'
 }
-if ($pp.Presentations.Count -eq 0) { $pp.Quit() }
-[void][Runtime.InteropServices.Marshal]::ReleaseComObject($pp)
 $fichiers
+
+
 
 
 
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDr09JxYqioXQ/o
-# 9U3Th6xOzlbtJ2ilCfohhiiWVI5YJKCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBi+UWX177q5txY
+# kmmmkvL+8lb1O7+2CQ3pSbRq82w5z6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -418,12 +492,12 @@ $fichiers
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgHgqP4rFo/QKfq6/A2vRogclI
-# EVOrjTuvAqZroFg/QKYwDQYJKoZIhvcNAQEBBQAEggEABTsQE6Og/GgrzE9xgd9X
-# 50w5Sai38kX+rM2nj8pg/xiRgLi4PBSXAhIvIE6rYQlaacog+3jHbJKYdJi9353B
-# Uoqpnba7nc4UMFhoiMjR9uB3qDZtV7HMISRQWUIpiClghKTUeQ+0H4IvVn8yZTWs
-# 05EODDobP37VJJW7S5zW3mztmivNIaV6r6Oh4QAvS80b0Q4rSmGzHx/EtkMyWvNF
-# fSAEosQrMJ5jn5n+ZspUD6wo70TOoSkd25HtBtOw+1jBOZ8g3v01YwWaLhXNOrlc
-# 5aibH/PwB06Nj+Ly/RfbqLNWgYtsFYDoAQyv0kKLMGP5F0TIPm2Dn3j9wDDXqg44
-# PA==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgd48xRiUFMZVAFsdt5qiRXzsi
+# 77SoVeY+mnrJ91hhBGMwDQYJKoZIhvcNAQEBBQAEggEAB17sKFY19Gowo70ScbrW
+# M847GDp1+GK3pqxa5ENcconnu7Jt/5T1zSxHKdMts25WnIzu/9QWI9KAXW2hF+gY
+# /Ajs2GWHlGJ5244a06d75g0bEPAghZQyJJXuHqUwFYMSH/0/rpr+Eg52udQ8wm7v
+# j2u6U63rPaw4fd85RTC7pGi7PJjwWNZ2Z4AnntFC762PHvYCxfA08GK8pBBkkHKl
+# cD0N+n22PyHlUo09N/VPXRfMcBcYEUWUXqNcDVBpNZfXF4zVI60mgQwbp91MvMW2
+# fyL1E3hGW3dI0rQNbsMnjtldbbhQeHw/+pEFNARgNx+Cp+K8kwUSJcat/WtuIwyS
+# 6A==
 # SIG # End signature block
