@@ -1,0 +1,11 @@
+# Données produites ou propres à chaque poste
+Rapports/
+Cache/
+Livraison/
+Archives/
+Sauvegardes/
+
+# Fichiers sans rapport avec le projet / identifiants
+CSE-*
+*.cred.xml
+*.clixml
