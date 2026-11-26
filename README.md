@@ -103,7 +103,7 @@ générateur PowerPoint les recontrôle et refuse de produire une présentation 
 
 ```
  Serveur SEAL (tâche « OMS - SEAL CVE collecte (quotidien) », 05:30, compte Système)
-   Get-SealCveReport.ps1 -Installation -InventaireSeul -Depot \BX-AD-01-IT-VM\OMS-Postes$\SEAL-CVE
+   Get-SealCveReport.ps1 -Installation -InventaireSeul -Depot \\BX-AD-01-IT-VM\OMS-Postes$\SEAL-CVE
         │  inventaire_<date>.json
         ▼
  DC  C:\DC\Applications\SEAL-CVE
