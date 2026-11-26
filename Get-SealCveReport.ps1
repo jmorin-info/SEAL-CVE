@@ -223,7 +223,8 @@ function Inventorier-Installation {
   $cles = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*', 'HKLM:\SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\*'
   $produits = @(Get-ItemProperty $cles -ErrorAction SilentlyContinue | Where-Object { $_.DisplayName -match '\bSEAL\b' -or $_.Publisher -match 'Omnitech' })
   $ver = $VersionSeal
-  if (-not $ver) { $ver = ($produits | Where-Object DisplayName -match '\bSEAL\b' | Sort-Object { Cle-Version $_.DisplayVersion } | Select-Object -Last 1).DisplayVersion }
+  # version du registre : repli seulement (des composants annexes y figurent, ex. « SEAL Millefeuille 24.0.0 »)
+  $verRegistre = ($produits | Where-Object DisplayName -match '^SEAL$|\bSEAL (Server|Serveur|Client|System)\b' | Sort-Object { Cle-Version $_.DisplayVersion } | Select-Object -Last 1).DisplayVersion
   $dossiers = @($RacineInstallation)
   if (-not $RacineInstallation.Count) {
     $dossiers += @($produits | ForEach-Object { $_.InstallLocation } | Where-Object { $_ })
@@ -250,9 +251,11 @@ function Inventorier-Installation {
 
   $fichiers = @(foreach ($d in $dossiers) { Get-ChildItem $d -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch $ExclureDossiers } })
   Log "  $($fichiers.Count) fichiers retenus (exclusions : installateurs, sauvegardes, mises à jour, journaux)"
-  if (-not $ver) {   # pas d'entrée Uninstall : version la plus fréquente des exécutables Omnitech (45,0,25468,x -> 45.0.25468)
+  if (-not $ver) {   # version la plus fréquente des exécutables Omnitech installés (45,0,25468,x -> 45.0.25468), puis registre
     $vs = @($fichiers | Where-Object { $_.Extension -eq '.exe' -and $_.VersionInfo.CompanyName -match 'Omnitech' } | ForEach-Object { [regex]::Match(("$($_.VersionInfo.ProductVersion)" -replace ',', '.' -replace '\s', ''), '^\d{2}\.\d+\.\d{4,6}').Value } | Where-Object { $_ })
     if ($vs.Count) { $ver = ($vs | Group-Object | Sort-Object Count -Descending | Select-Object -First 1).Name; Log "  version SEAL déduite des exécutables Omnitech : $ver" }
+    elseif ($verRegistre) { $ver = $verRegistre; Log "  version SEAL lue dans le registre : $ver" }
+    if ($verRegistre -and $ver -and $verRegistre -ne $ver) { Diag 'Information' 'Version' "Registre : $verRegistre ; exécutables : $ver (version des exécutables retenue)" }
   }
   $dossiersPaquets = @{}
   foreach ($f in $fichiers | Where-Object { $_.Name -like '*.deps.json' }) {
@@ -798,8 +801,8 @@ $dest
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC/cf0dOH24F66j
-# KazCWMaMNUF5OV+qJSMXDSo1sk3ne6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBbzqzGwBm85Ht4
+# rI9c4l37hbF5qbxLhraJRV36XQ38R6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -839,12 +842,12 @@ $dest
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgFU+FUkSCTZmX5BzrPiifz9Q0
-# IKfe5udEMBI/cmILE6cwDQYJKoZIhvcNAQEBBQAEggEAMCdUSdJB9dp6cGXuOi/+
-# orjLjPoSqKOMxc/2Na6VVNpfLdt70rLdEiUdEMUcI0fAZXlMTALzc8Uk/wjuaje8
-# I68kE9UwI/F253XKOHeKWpe3XFZUFmUoj7Q3VateBrKVAjQoTri/k/8Xs+g3aXf9
-# m6+0ZGxn88/4PSTzKN5jKFhTdTMe8Lp3z9NNoubjUyqIjwvhW7tQa9n/03RdjlCV
-# cLzmJ8tEu/1MgepLgjn6itgzVzngaI+fLPazto1AwOWozgvmoRmII6W1bPbyyFGK
-# MmHU1feV1GiW122Ke0VoqjXX7RKfnLdyjcBXLiIPfymMF8Gk5j2S/zfmOMCuTmjM
-# Tw==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgZrgnDp3k3a+Emx3Mnq8+VlEU
+# t4eUFmNJ0YK+2r2CVNQwDQYJKoZIhvcNAQEBBQAEggEAGaxqZdinuxIFHqMvO2pY
+# VMI+uc4uIdJzZvD3j//Z0tDOY/OpaztCrgWIlSkiwsZd3hhSnpnCjIIZIfjJVaSV
+# 7/WeL3oh01oZps3HMifLPdYBkiEAuAZgITDsNzwWNuwRW3vWWflha4GtzCq4t62O
+# yrPcVatLauaJKR5QmzxOeDdqCxh/+TeP42PlsYBDMXXF5f6boxnehUvy41NHwpK+
+# yCMbGskn96jkhkWx3e19GBMRcl+gx8U+q1AjP59GJ71smJqRoVXD7FwdhywG3WJr
+# RJNduEK0KrHy5B6pwy9VGzZ9T8r3H3OYYyF2EnTiK8LK0kZE+6sPOSDpkjWjrvNe
+# fw==
 # SIG # End signature block
