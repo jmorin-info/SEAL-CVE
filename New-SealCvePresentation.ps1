@@ -352,7 +352,7 @@ if ($Synthese) {
   }
   if ($Dotnet.Count -or $fw.Count) {
     $sl = Diapo 'Environnement serveur : runtimes .NET et .NET Framework'
-    $rows = @($Dotnet | Sort-Object Runtime, { CleV $_.Version } | Select-Object -First 9 | ForEach-Object { , @(@{ T = (Court $_.Runtime); B = $true }, $_.Version, $_.Usage, $(if ($_.HorsSupport -eq 'OUI') { @{ T = "$($_.FinSupport) HORS SUPPORT"; C = $Rouge; B = $true } } else { $_.FinSupport }), @{ T = $_.CVE; A = 2 }, $(if ($_.HorsSupport -eq 'OUI') { 'Migrer vers une branche LTS supportée' } else { $_.Commentaire })) })
+    $rows = @($Dotnet | Sort-Object Runtime, { CleV $_.Version } | Select-Object -First 13 | ForEach-Object { , @(@{ T = (Court $_.Runtime); B = $true }, $_.Version, $_.Usage, $(if ($_.HorsSupport -eq 'OUI') { @{ T = "$($_.FinSupport) HORS SUPPORT"; C = $Rouge; B = $true } } else { $_.FinSupport }), @{ T = $_.CVE; A = 2 }, $(if ($_.HorsSupport -eq 'OUI') { 'Migrer vers une branche LTS supportée' } else { $_.Commentaire })) })
     if ($rows.Count) { [void](Tableau $sl @('Runtime', 'Version', 'Usage par SEAL', 'Fin de support', 'CVE', 'Action') $rows 43 82 @(150, 65, 190, 140, 40, 290) 9.5) }
     if ($fw.Count) {
       $yb = 82 + 20 * ($rows.Count + 1) + 20
@@ -451,8 +451,8 @@ $fichiers
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBi+UWX177q5txY
-# kmmmkvL+8lb1O7+2CQ3pSbRq82w5z6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC5Iomm0gXSn/TF
+# K2dTeDGpQ6L8xI1DK1N/WFJPMscgcaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -492,12 +492,12 @@ $fichiers
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgd48xRiUFMZVAFsdt5qiRXzsi
-# 77SoVeY+mnrJ91hhBGMwDQYJKoZIhvcNAQEBBQAEggEAB17sKFY19Gowo70ScbrW
-# M847GDp1+GK3pqxa5ENcconnu7Jt/5T1zSxHKdMts25WnIzu/9QWI9KAXW2hF+gY
-# /Ajs2GWHlGJ5244a06d75g0bEPAghZQyJJXuHqUwFYMSH/0/rpr+Eg52udQ8wm7v
-# j2u6U63rPaw4fd85RTC7pGi7PJjwWNZ2Z4AnntFC762PHvYCxfA08GK8pBBkkHKl
-# cD0N+n22PyHlUo09N/VPXRfMcBcYEUWUXqNcDVBpNZfXF4zVI60mgQwbp91MvMW2
-# fyL1E3hGW3dI0rQNbsMnjtldbbhQeHw/+pEFNARgNx+Cp+K8kwUSJcat/WtuIwyS
-# 6A==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgtCpHKdjfqZxPKaOmD8TfN6jA
+# xDk7x2ZB0nVup6L6hHowDQYJKoZIhvcNAQEBBQAEggEAtSwRuiijOMNSvk6DuHne
+# Ylv1OM5xsLfS1M4CXj5MMdiqkHu5qJLpvex6MC+lU9ZLDeeak3XpfBSbSr8qxZuZ
+# csQYP4i5DM6DNiLiycXzoFkpBxc4cSC1eDeP3DOGFUHe1dsgAvJFVg6kf47l9CXJ
+# dTeQYD7va9vh5g+mQJ1UAxRWSYcSOW6rXVHzKCUcY1vxzrwl9NXB9Bsve5jRyYo2
+# ogBbfU8NtvwIi4Od6jZ1h2VSxx0HH8BuDsgiXUTx3nOq29z1djH7qj0LB13QB70u
+# JJHxLZsyXKoUdPcNX8RQYRx1M5etJvtl+mYDUpRxFlsAeu8OZfLMpt1xqhFb9lou
+# yg==
 # SIG # End signature block

@@ -507,6 +507,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
     $cpe = $CpeNatifs[$c.Composant]
     if (-not $cpe) { $c.Statut = "Non couvert : $(if ($NonCouverts[$c.Composant]) { $NonCouverts[$c.Composant] } else { 'pas de CPE connue' })"; continue }
     $v = Version-Propre $c.Version
+    if (-not $v -or $v -match '^0(\.0)*$') { $c.Statut = 'Non couvert : version de fichier absente (interrogation NVD impossible sans faux positifs)'; continue }
     if ($v -match '^(\d+\.\d+\.\d+)\.(\d+)$') {
       if ($Matches[2] -eq '0') { $v = $Matches[1] }
       else { $c.Identite = 'À confirmer'; $c.Note = "Version de fichier $($c.Version) interprétée $($Matches[1]) : à confirmer"; $v = $Matches[1] }
@@ -801,8 +802,8 @@ $dest
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBbzqzGwBm85Ht4
-# rI9c4l37hbF5qbxLhraJRV36XQ38R6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDKr8jK0c0vOgGs
+# F329l+hsha6lHu8QmqZIB4SHDXlzsaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -842,12 +843,12 @@ $dest
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgZrgnDp3k3a+Emx3Mnq8+VlEU
-# t4eUFmNJ0YK+2r2CVNQwDQYJKoZIhvcNAQEBBQAEggEAGaxqZdinuxIFHqMvO2pY
-# VMI+uc4uIdJzZvD3j//Z0tDOY/OpaztCrgWIlSkiwsZd3hhSnpnCjIIZIfjJVaSV
-# 7/WeL3oh01oZps3HMifLPdYBkiEAuAZgITDsNzwWNuwRW3vWWflha4GtzCq4t62O
-# yrPcVatLauaJKR5QmzxOeDdqCxh/+TeP42PlsYBDMXXF5f6boxnehUvy41NHwpK+
-# yCMbGskn96jkhkWx3e19GBMRcl+gx8U+q1AjP59GJ71smJqRoVXD7FwdhywG3WJr
-# RJNduEK0KrHy5B6pwy9VGzZ9T8r3H3OYYyF2EnTiK8LK0kZE+6sPOSDpkjWjrvNe
-# fw==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg779WvYTx/3rnmSM6qah5BL6e
+# 4nd2V8fnsJLEiueD4I4wDQYJKoZIhvcNAQEBBQAEggEAZKdCXFcKYCNYzyYSOpBF
+# nILtfmHe5Ja2sR1jGRMinnittR7Tv5gEshcnpIxHLS2fLyo5/OEfVzmc6wq0+eBh
+# v5IhfVgtr6tPzIuvmWTj7y/bLqwzSkRdi999yiynBf1YO94dS4njc4mkxHkvZ6e4
+# vez8marKVrsstiT8bQszQCDGNk2cSc7JGxXaoqGW/3EMpJXsl8eCXpXBPgLkOtgQ
+# UVGFToHF5dm7GHxCM+cgnSEyzHruo+YPM1rfNGqItmDLY1ZmBAVNIyRwVAdYVl25
+# PCXxtbsWeb/RkU9VwVMQ0kQi1TUoQYH7a6MzPSksRapkno68e8SUh3dgl6++vt7c
+# 8A==
 # SIG # End signature block
