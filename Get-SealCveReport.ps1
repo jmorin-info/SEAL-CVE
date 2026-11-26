@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
   Inventaire des dépendances d'une version de SEAL et rapport des CVE associées, classées par mois (CSV, JSON, HTML,
-  PowerPoint en option). Moteur 3.0.
+  PowerPoint en option). Moteur 3.1.
 
 .DESCRIPTION
   Sources d'inventaire :
@@ -20,6 +20,7 @@
                 Les CVE .NET Framework corrigées par un KB installé ou non applicables à l'OS sont listées à part
                 (catégorie « Corrigée / non applicable ») et ne sont pas comptées comme ouvertes.
     Constat     = une CVE (ou un avis sans CVE) × un composant × une version.
+    Mois        = mois de publication de la CVE (fiche CVE OSV / NVD) ; à défaut, de l'avis.
     CVSS        : inconnu = « Non renseigné » (jamais 0) ; la gravité vient alors de l'avis (GitHub).
 
   Sources : OSV.dev (NuGet, npm, runtimes .NET), NVD (bibliothèques C++, .NET Framework), MSRC (KB .NET Framework),
@@ -42,7 +43,7 @@ param(
   [Parameter(ParameterSetName = 'Installation')][switch]$Installation,
   [Parameter(ParameterSetName = 'Installation')][string[]]$RacineInstallation = @(),
   [Parameter(ParameterSetName = 'Installation')][string[]]$DossiersSupplementaires = @(),
-  [Parameter(ParameterSetName = 'Installation')][switch]$InventaireSeul,
+  [switch]$InventaireSeul,                     # collecte seule (installation ou livraison), sans interroger les référentiels
   [Parameter(ParameterSetName = 'Artefacts', Mandatory)][string]$Artefacts,
   [Parameter(ParameterSetName = 'Inventaire', Mandatory)][string]$Inventaire,
   [Parameter(ParameterSetName = 'Consolider', Mandatory)][switch]$Consolider,
@@ -64,7 +65,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
 Add-Type -AssemblyName System.IO.Compression.FileSystem
-$MoteurVersion = '3.0'
+$MoteurVersion = '3.1'   # 3.1 : mois = date de publication de la CVE (et non de l'avis GitHub)
 trap { Write-Host "ERREUR : $($_.Exception.Message)" -ForegroundColor Red; Write-Host $_.ScriptStackTrace; break }
 if (-not $Sortie) { $Sortie = Join-Path $PSScriptRoot 'Rapports' }
 if (-not $Cache) { $Cache = Join-Path $PSScriptRoot 'Cache' }
@@ -337,6 +338,19 @@ function Get-OsvDetail([string]$id) {
   if ((Age-Heures $f) -lt 72) { try { return Lire-JsonFichier $f } catch {} }
   try { $j = Invoke-Json "https://api.osv.dev/v1/vulns/$id"; Ecrire-Json $f $j; $j } catch { Diag 'Attention' 'OSV' "fiche $id indisponible"; $null }
 }
+# Date de publication officielle d'une CVE (fiche CVE d'OSV, alignée sur la NVD) : même règle de classement par mois
+# pour tous les écosystèmes ; un avis GitHub peut être publié ou relu des mois après la CVE. Cache permanent (date figée).
+$script:DatesCve = $null
+function Date-Cve([string]$cve, [string]$repli) {
+  if ($cve -notmatch '^CVE-\d{4}-\d+$') { return $repli }
+  $f = Join-Path $Cache 'dates-cve.json'
+  if ($null -eq $script:DatesCve) { $script:DatesCve = @{}; if (Test-Path $f) { try { (Lire-JsonFichier $f).PSObject.Properties | ForEach-Object { $script:DatesCve[$_.Name] = $_.Value } } catch {} } }
+  if (-not $script:DatesCve.ContainsKey($cve)) {
+    try { $j = Invoke-Json "https://api.osv.dev/v1/vulns/$cve"; if ($j.published) { $script:DatesCve[$cve] = ([datetime]$j.published).ToString('yyyy-MM-dd'); $script:DatesCveModifie = $true } } catch {}
+  }
+  if ($script:DatesCve.ContainsKey($cve)) { $script:DatesCve[$cve] } else { $repli }
+}
+function Enregistrer-DatesCve { if ($script:DatesCveModifie) { Ecrire-Json (Join-Path $Cache 'dates-cve.json') ([pscustomobject]$script:DatesCve); $script:DatesCveModifie = $false } }
 function Get-NvdCpe([string]$cpe) {
   $f = Join-Path "$Cache\nvd" ((Nom-Fichier $cpe) + '.json')
   if ((Age-Heures $f) -lt 72) { try { return @(Lire-JsonFichier $f) } catch {} }
@@ -353,7 +367,7 @@ function Get-NvdCpe([string]$cpe) {
       $vuln = @($v.configurations.nodes.cpeMatch | Where-Object { $_.vulnerable -and "$($_.criteria)".StartsWith($prefixe, [StringComparison]::OrdinalIgnoreCase) })
       if ($v.configurations -and -not $vuln.Count) { continue }
       $mt = @($v.metrics.cvssMetricV31) + @($v.metrics.cvssMetricV30) + @($v.metrics.cvssMetricV40) + @($v.metrics.cvssMetricV2) | Where-Object { $_ } | Select-Object -First 1
-      [pscustomobject]@{ Id = $v.id; Score = $(if ($mt) { [double]$mt.cvssData.baseScore } else { $null }); Publie = ([datetime]$v.published).ToString('yyyy-MM-dd')
+      [pscustomobject]@{ Id = $v.id; Score = $(if ($mt -and [double]$mt.cvssData.baseScore -gt 0) { [double]$mt.cvssData.baseScore } else { $null }); Publie = ([datetime]$v.published).ToString('yyyy-MM-dd')
         Resume = "$(($v.descriptions | Where-Object lang -eq 'en' | Select-Object -First 1).value)"; Corrige = (@($vuln | ForEach-Object { $_.versionEndExcluding } | Where-Object { $_ } | Sort-Object -Unique) -join ' / ') }
     })
   Ecrire-Json $f @($l)
@@ -491,15 +505,18 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
       if (-not $cves.Count) { $cves = @($d.id) }
       $vec = @(@($d.severity) + @($d.affected | ForEach-Object { $_.severity }) | Where-Object { $_.type -like 'CVSS_V3*' } | ForEach-Object { $_.score }) | Select-Object -First 1
       $sc = if ($vec) { Score-Cvss3 $vec } else { $null }
+      if ($sc -eq 0) { $sc = $null }   # vecteur sans impact (C:N/I:N/A:N) publié en attente d'évaluation : non renseigné, gravité de l'avis
       $fix = @(@(foreach ($a in $d.affected) { if ($a.package.name -eq $paquet) { foreach ($rg in $a.ranges) { foreach ($ev in $rg.events) { if ($ev.fixed) { $ev.fixed } } } } }) | Sort-Object -Unique)
       $fixProche = @($fix | Where-Object { (Comparer-Version $_ $c.Version) -gt 0 } | Sort-Object { Cle-Version $_ }) | Select-Object -First 1
       foreach ($cve in $cves) {
-        $constats.Add([pscustomobject]@{ CVE = $cve; Avis = $d.id; Publie = ([datetime]$d.published).ToString('yyyy-MM-dd'); CVSS = $sc; GraviteSource = "$($d.database_specific.severity)"
+        $dateAvis = ([datetime]$d.published).ToString('yyyy-MM-dd')
+        $constats.Add([pscustomobject]@{ CVE = $cve; Avis = $d.id; Publie = (Date-Cve $cve $dateAvis); PublieAvis = $dateAvis; CVSS = $sc; GraviteSource = "$($d.database_specific.severity)"
             Comp = $c; Corrige = $(if ($fixProche) { $fixProche } else { '' }); SansCorrection = (-not $fixProche)
             Resume = $(if ($d.summary) { "$($d.summary)" } else { ("$($d.details)" -split "`n")[0] }); StatutKB = '' })
       }
     }
   }
+  Enregistrer-DatesCve
   foreach ($c in $uniq | Where-Object { $_.Ecosysteme -eq 'Runtime .NET' -and -not $PaquetsRuntime.ContainsKey($_.Composant) }) { $c.Statut = 'Non couvert : runtime sans paquet suivi par OSV' }
 
   # ---- bibliothèques C++ : NVD (CPE)
@@ -515,7 +532,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
     $l = Get-NvdCpe "cpe:2.3:a:$($cpe):$v"
     if ($null -eq $l) { $c.Statut = 'Non vérifié : NVD indisponible'; continue }
     $c.Statut = 'Vérifié (NVD)'
-    foreach ($x in @($l | Where-Object { $_ })) { $constats.Add([pscustomobject]@{ CVE = $x.Id; Avis = 'NVD'; Publie = $x.Publie; CVSS = $x.Score; GraviteSource = ''; Comp = $c; Corrige = $x.Corrige; SansCorrection = (-not $x.Corrige); Resume = $x.Resume; StatutKB = '' }) }
+    foreach ($x in @($l | Where-Object { $_ })) { $constats.Add([pscustomobject]@{ CVE = $x.Id; Avis = 'NVD'; Publie = $x.Publie; PublieAvis = $x.Publie; CVSS = $x.Score; GraviteSource = ''; Comp = $c; Corrige = $x.Corrige; SansCorrection = (-not $x.Corrige); Resume = $x.Resume; StatutKB = '' }) }
   }
   foreach ($c in @($uniq | Where-Object Ecosysteme -eq 'Binaire')) { $c.Statut = 'Non couvert : DLL tierce sans identité de paquet publique' }
 
@@ -526,7 +543,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
     if ($null -eq $l) { $c.Statut = 'Non vérifié : NVD indisponible'; continue }
     $c.Statut = 'Vérifié (NVD + MSRC)'
     $qual = Qualifier-NetFramework @($l | ForEach-Object { $_.Id }) $meta.Hote
-    foreach ($x in @($l | Where-Object { $_ })) { $constats.Add([pscustomobject]@{ CVE = $x.Id; Avis = 'NVD / MSRC'; Publie = $x.Publie; CVSS = $x.Score; GraviteSource = ''; Comp = $c; Corrige = $qual[$x.Id].KB; SansCorrection = $false; Resume = $x.Resume; StatutKB = $qual[$x.Id] }) }
+    foreach ($x in @($l | Where-Object { $_ })) { $constats.Add([pscustomobject]@{ CVE = $x.Id; Avis = 'NVD / MSRC'; Publie = $x.Publie; PublieAvis = $x.Publie; CVSS = $x.Score; GraviteSource = ''; Comp = $c; Corrige = $qual[$x.Id].KB; SansCorrection = $false; Resume = $x.Resume; StatutKB = $qual[$x.Id] }) }
   }
 
   # ---- catégorie et dédoublonnage : un constat = CVE (ou avis sans CVE) × composant × version
@@ -544,7 +561,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
       else { 'Version associée à un avis publié ; exploitabilité à qualifier' }
       $grav = Gravite $x.CVSS $x.GraviteSource
       [pscustomobject][ordered]@{
-        'Catégorie' = $cat; 'Mois' = $x.Publie.Substring(0, 7); 'CVE' = $x.CVE; 'Publiée' = $x.Publie; 'CVSS' = (Texte-Cvss $x.CVSS); 'Gravité' = $grav
+        'Catégorie' = $cat; 'Mois' = $x.Publie.Substring(0, 7); 'CVE' = $x.CVE; 'Publiée' = $x.Publie; 'Publication avis' = $x.PublieAvis; 'CVSS' = (Texte-Cvss $x.CVSS); 'Gravité' = $grav
         'KEV' = $(if ($kev.ContainsKey($x.CVE)) { 'OUI' } else { '' }); 'Périmètre' = $c.Perimetre; 'Écosystème' = $c.Ecosysteme; 'Composant' = $c.Composant; 'Version installée' = $c.Version
         'Version corrigée' = $(if ($x.Corrige) { $x.Corrige } elseif ($x.SansCorrection) { 'Aucune correction publiée' } else { '' }); 'État' = $etat; 'Modules SEAL' = $c.Modules
         'Avis' = (@($_.Group.Avis | Sort-Object -Unique) -join ', '); 'Résumé' = $(if ($x.Resume.Length -gt 240) { $x.Resume.Substring(0, 237) + '…' } else { $x.Resume })
@@ -556,7 +573,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
   $comparable = $false; $disparues = @(); $prec = $null
   if ($precedent) {
     try { $prec = Lire-JsonFichier (Join-Path $precedent 'resume.json') } catch {}
-    $comparable = $prec -and "$($prec.VersionMoteur)" -eq $MoteurVersion -and "$($prec.Source)" -eq "$($meta.Source)"
+    $comparable = $prec -and "$($prec.VersionMoteur)".Split('.')[0] -eq $MoteurVersion.Split('.')[0] -and "$($prec.Source)" -eq "$($meta.Source)"
     if ($comparable) {
       $anc = @{}; foreach ($p in @(Import-Csv (Join-Path $precedent 'cve-detail.csv') -Delimiter ';' -Encoding UTF8)) { $anc["$($p.CVE)|$($p.Composant)|$($p.'Version installée')|$($p.'Catégorie')"] = $p }
       foreach ($l in $lignes) { $k = "$($l.CVE)|$($l.Composant)|$($l.'Version installée')|$($l.'Catégorie')"; if (-not $anc.ContainsKey($k)) { $l.'Nouveau' = 'OUI' }; [void]$anc.Remove($k) }
@@ -642,7 +659,7 @@ function Analyser([string]$version, [string]$dossierSortie, $meta, [string]$prec
     $p = Join-Path $dossierSortie $nom
     $tab = if ($rows -is [Collections.Generic.List[object]]) { $rows.ToArray() } else { @($rows) }   # @() sur une List<object> échoue sous PowerShell 5.1
     if ($tab.Count) { $tab | Select-Object $colonnes | Export-Csv $p @csv } else { [IO.File]::WriteAllText($p, ((@($colonnes | ForEach-Object { '"' + $_ + '"' }) -join ';') + "`r`n"), [Text.UTF8Encoding]::new($true)) } }
-  $colsCve = @('Catégorie', 'Mois', 'CVE', 'Publiée', 'CVSS', 'Gravité', 'KEV', 'Périmètre', 'Écosystème', 'Composant', 'Version installée', 'Version corrigée', 'État', 'Modules SEAL', 'Avis', 'Résumé', 'Lien', 'Nouveau')
+  $colsCve = @('Catégorie', 'Mois', 'CVE', 'Publiée', 'Publication avis', 'CVSS', 'Gravité', 'KEV', 'Périmètre', 'Écosystème', 'Composant', 'Version installée', 'Version corrigée', 'État', 'Modules SEAL', 'Avis', 'Résumé', 'Lien', 'Nouveau')
   Ecrire-Csv 'cve-detail.csv' $lignes $colsCve
   Ecrire-Csv 'cve-par-mois.csv' $parMois @('Catégorie', 'Mois', 'Constats', 'CVE', 'Critique', 'Haute', 'Moyenne', 'Basse/n.r.', 'KEV', 'Composants')
   Ecrire-Csv 'inventaire.csv' $invOut @('Périmètre', 'Écosystème', 'Composant', 'Version', 'Identité', 'Catégorie', 'CVE', 'CVSS max', 'Gravité max', 'Version cible', 'Statut', 'Licence', 'Modules SEAL', 'Méthodes', 'Note')
@@ -684,6 +701,15 @@ tr:nth-child(even) td{background:#f8fafc}.g{font-weight:600;padding:1px 6px;bord
   [void]$sb.Append('<h2>Synthèse par catégorie</h2><table><tr><th>Catégorie</th><th>CVE distinctes</th><th>Constats</th><th>Composants</th><th>Critique</th><th>Haute</th><th>Moyenne</th><th>Basse / n.r.</th><th>KEV</th></tr>')
   foreach ($cat in $r.ParCategorie.Keys) { $s = $r.ParCategorie[$cat]; [void]$sb.Append("<tr><td><b>$(Html $cat)</b></td><td>$($s.CVE)</td><td>$($s.Constats)</td><td>$($s.Composants)</td><td>$($s.Critique)</td><td>$($s.Haute)</td><td>$($s.Moyenne)</td><td>$($s.Basse)</td><td>$($s.KEV)</td></tr>") }
   [void]$sb.Append("<tr><td><b>Non couvert</b> (inventaire)</td><td colspan=""8"">$($r.NonCouverts) composant(s) sans référentiel public exploitable</td></tr></table>")
+  $seal = @($lignes | Where-Object { $_.'Catégorie' -eq 'Dépendance SEAL' })
+  if ($seal.Count) {
+    [void]$sb.Append('<h2>Dépendances SEAL par mois de publication des CVE</h2><table><tr><th>Mois</th><th>CVE</th><th>Critique</th><th>Haute</th><th>Moyenne</th><th>Basse / n.r.</th><th>KEV</th><th>Composants</th></tr>')
+    foreach ($g in $seal | Group-Object Mois | Sort-Object Name -Descending) {
+      $gg = $g.Group
+      [void]$sb.Append("<tr><td>$($g.Name)</td><td>$(@($gg.CVE | Sort-Object -Unique).Count)</td><td>$(@($gg | Where-Object Gravité -eq 'Critique').Count)</td><td>$(@($gg | Where-Object Gravité -eq 'Haute').Count)</td><td>$(@($gg | Where-Object Gravité -eq 'Moyenne').Count)</td><td>$(@($gg | Where-Object { $_.'Gravité' -in 'Basse', 'Non renseignée' }).Count)</td><td>$(@($gg | Where-Object KEV -eq 'OUI').Count)</td><td>$(Html ((@($gg | ForEach-Object { "$($_.Composant) $($_.'Version installée')" } | Sort-Object -Unique)) -join ', '))</td></tr>")
+    }
+    [void]$sb.Append('</table>')
+  }
   if ($r.RapportPrecedent) { [void]$sb.Append($(if ($r.HistoriqueComparable) { "<p>Depuis le rapport $(Html $r.RapportPrecedent) : $($r.Nouvelles) nouveau(x) constat(s), $($r.Disparues) disparu(s).</p>" } else { "<p>Rapport précédent $(Html $r.RapportPrecedent) produit avec un autre moteur ou une autre source : comparaison non effectuée.</p>" })) }
   if (@($dotnet).Count) {
     [void]$sb.Append('<h2>Runtimes .NET</h2><table><tr><th>Runtime</th><th>Version</th><th>Usage</th><th>Fin de support</th><th>Hors support</th><th>Dernière version</th><th>CVE</th><th>Commentaire</th></tr>')
@@ -714,7 +740,7 @@ tr:nth-child(even) td{background:#f8fafc}.g{font-weight:600;padding:1px 6px;bord
 
 # ============================================================================================ consolidation multi-versions
 if ($Consolider) {
-  $derniers = @(Get-ChildItem $Sortie -Directory | ForEach-Object { Get-ChildItem $_.FullName -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'resume.json') } | Where-Object { "$((Lire-JsonFichier (Join-Path $_.FullName 'resume.json')).VersionMoteur)" -eq $MoteurVersion } | Sort-Object Name | Select-Object -Last 1 })
+  $derniers = @(Get-ChildItem $Sortie -Directory | ForEach-Object { Get-ChildItem $_.FullName -Directory | Where-Object { Test-Path (Join-Path $_.FullName 'resume.json') } | Where-Object { "$((Lire-JsonFichier (Join-Path $_.FullName 'resume.json')).VersionMoteur)".Split('.')[0] -eq $MoteurVersion.Split('.')[0] } | Sort-Object Name | Select-Object -Last 1 })
   $all = foreach ($d in $derniers) { $r = Lire-JsonFichier (Join-Path $d.FullName 'resume.json'); Import-Csv (Join-Path $d.FullName 'cve-detail.csv') -Delimiter ';' -Encoding UTF8 | Select-Object @{ n = 'Version SEAL'; e = { $r.VersionSeal } }, @{ n = 'Source'; e = { $r.Source } }, * }
   @($all) | Export-Csv (Join-Path $Sortie 'SEAL_toutes_versions_cve.csv') -Delimiter ';' -NoTypeInformation -Encoding UTF8
   $syn = foreach ($d in $derniers) { $r = Lire-JsonFichier (Join-Path $d.FullName 'resume.json'); $s = $r.ParCategorie
@@ -799,11 +825,14 @@ $dest
 
 
 
+
+
+
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDKr8jK0c0vOgGs
-# F329l+hsha6lHu8QmqZIB4SHDXlzsaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCBifRyynar4cz20
+# AE1qnp6q8DJ4v7ULchxXq2RhHScII6CCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -843,12 +872,12 @@ $dest
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg779WvYTx/3rnmSM6qah5BL6e
-# 4nd2V8fnsJLEiueD4I4wDQYJKoZIhvcNAQEBBQAEggEAZKdCXFcKYCNYzyYSOpBF
-# nILtfmHe5Ja2sR1jGRMinnittR7Tv5gEshcnpIxHLS2fLyo5/OEfVzmc6wq0+eBh
-# v5IhfVgtr6tPzIuvmWTj7y/bLqwzSkRdi999yiynBf1YO94dS4njc4mkxHkvZ6e4
-# vez8marKVrsstiT8bQszQCDGNk2cSc7JGxXaoqGW/3EMpJXsl8eCXpXBPgLkOtgQ
-# UVGFToHF5dm7GHxCM+cgnSEyzHruo+YPM1rfNGqItmDLY1ZmBAVNIyRwVAdYVl25
-# PCXxtbsWeb/RkU9VwVMQ0kQi1TUoQYH7a6MzPSksRapkno68e8SUh3dgl6++vt7c
-# 8A==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgcG/cPV+ZNiQlk31hrJXdtvdL
+# z/sGmE5/GCYDR1PDLJYwDQYJKoZIhvcNAQEBBQAEggEAZWfeEIX748QQ5StUC/RZ
+# ehPy8CcVyDJEa/kj/AMaTbQR9WM7fydOu4QJUsmgwx2iDdEj1/eedL7UOTdiLgNJ
+# XRuy2DGSzNzte65XOTzbsRwa5+2RGq8L/AYHye9k/cDICO2Mxs3VKBwjcNQo6s5q
+# YF+4HUCM/woAhOznQkwpOKejApZDpypmFHayXR08wMTvS8llRhCum0nkPmYlpoY/
+# zpXNBy4/2Wh/kJGC0usTXd2TyQVWUbTACtWXgYx13TBu1lqDFQCP5Yt2rUQOYx/J
+# 50IbPa2DU75u12vZmHYkPZSXOXG14qHqSvt04qttgLy+OR7FdwKjm6zCMzVYd+j+
+# Lw==
 # SIG # End signature block

@@ -34,6 +34,8 @@ foreach ($d in $Rapports, $CacheDir, $Journaux) { New-Item -ItemType Directory -
 $journal = Join-Path $Journaux ("{0}_{1}.log" -f $Mode, (Get-Date -Format 'yyyyMMdd_HHmm'))
 function JL([string]$m) { $l = "[{0:yyyy-MM-dd HH:mm:ss}] {1}" -f (Get-Date), $m; Add-Content -Path $journal -Value $l -Encoding UTF8; Write-Host $l }
 Get-ChildItem $Journaux -Filter '*.log' | Where-Object LastWriteTime -lt (Get-Date).AddDays(-90) | Remove-Item -Force
+# cache des référentiels : fiches de plus de 30 jours supprimées (les dates de publication des CVE, figées, sont conservées)
+foreach ($sd in 'osv', 'nvd', 'msrc') { Get-ChildItem (Join-Path $CacheDir $sd) -File -ErrorAction SilentlyContinue | Where-Object LastWriteTime -lt (Get-Date).AddDays(-30) | Remove-Item -Force -ErrorAction SilentlyContinue }
 $dest = if ($Destinataires.Count) { $Destinataires } else { @($cfg.Destinataires) }
 $suspendu = Test-Path (Join-Path $RacineProjet 'SUSPENDRE-MAILS')
 $etatF = Join-Path $RacineProjet 'etat.json'
@@ -69,6 +71,14 @@ foreach ($srv in @($cfg.Serveurs)) {
   $depot = Join-Path $cfg.Depot $nom
   $inv = Get-ChildItem $depot -Filter 'inventaire_*.json' -ErrorAction SilentlyContinue | Sort-Object Name | Select-Object -Last 1
   if (-not $inv) { $etatServeurs.Add([pscustomobject]@{ Serveur = $nom; Etat = 'Aucun inventaire reçu (tâche de collecte absente ou en échec)'; Rapport = (Dernier-Rapport $nom) }); JL "$nom : aucun inventaire dans $depot"; continue }
+  # authenticité : le partage est accessible en écriture à tous les ordinateurs du domaine ; l'inventaire doit appartenir
+  # au compte ordinateur du serveur et porter son nom, sinon il est rejeté (dépôt usurpé ou copie manuelle)
+  $proprio = try { "$((Get-Acl $inv.FullName).Owner)" } catch { '' }
+  $machineInv = try { "$((Get-Content $inv.FullName -Raw -Encoding UTF8 | ConvertFrom-Json).Meta.Machine)" } catch { '' }
+  if (-not $proprio.EndsWith("\$nom`$", [StringComparison]::OrdinalIgnoreCase) -or $machineInv -ne $nom) {
+    JL "$nom : inventaire $($inv.Name) REJETÉ (propriétaire « $proprio », machine déclarée « $machineInv »)"
+    $etatServeurs.Add([pscustomobject]@{ Serveur = $nom; Etat = "Inventaire rejeté : propriétaire $proprio, machine $machineInv"; Rapport = (Dernier-Rapport $nom) }); continue
+  }
   $age = ((Get-Date) - $inv.LastWriteTime).TotalHours
   $etatTxt = if ($age -gt 48) { "Inventaire ancien : dernier reçu le $($inv.LastWriteTime.ToString('dd/MM/yyyy HH:mm'))" } else { "Inventaire du $($inv.LastWriteTime.ToString('dd/MM/yyyy HH:mm'))" }
   # ---- analyse de chaque nouvel inventaire (quotidien ; l'hebdomadaire rattrape un passage manqué)
@@ -100,18 +110,19 @@ if ($Mode -eq 'Hebdo') {
   $pj = New-Object Collections.Generic.List[string]
   $lignes = New-Object Collections.Generic.List[object]; $sections = ''; $statut = 'OK'
   foreach ($e in $etatServeurs) {
-    if (-not $e.Rapport) { $lignes.Add([pscustomobject]@{ Serveur = $e.Serveur; 'Version SEAL' = ''; 'CVE SEAL' = ''; 'Critiques' = ''; 'Environnement' = ''; 'À confirmer' = ''; 'Inventaire' = $e.Etat }); if ($statut -eq 'OK') { $statut = 'ATTENTION' }; continue }
+    if (-not $e.Rapport) { $lignes.Add([pscustomobject]@{ Serveur = $e.Serveur; 'Version SEAL' = ''; 'CVE SEAL' = ''; 'Critiques' = ''; 'KEV' = ''; 'Environnement' = ''; 'Runtimes hors support' = ''; 'À confirmer' = ''; 'Inventaire' = $e.Etat }); if ($statut -eq 'OK') { $statut = 'ATTENTION' }; continue }
     $d = $e.Rapport.FullName
     $r = Get-Content (Join-Path $d 'resume.json') -Raw -Encoding UTF8 | ConvertFrom-Json
     try { [void](Lancer 'New-SealCvePresentation.ps1' @('-Rapport', $d)); Get-ChildItem $d -Filter '*.pptx' | Sort-Object LastWriteTime -Descending | Select-Object -First 2 | ForEach-Object { $pj.Add($_.FullName) } } catch { JL "$($e.Serveur) : présentation non générée : $($_.Exception.Message)"; $statut = 'ATTENTION' }
     $s = $r.ParCategorie
-    $lignes.Add([pscustomobject]@{ Serveur = $e.Serveur; 'Version SEAL' = $r.VersionSeal; 'CVE SEAL' = $s.'Dépendance SEAL'.CVE; 'Critiques' = $s.'Dépendance SEAL'.Critique; 'Environnement' = $s.'Environnement'.Constats; 'À confirmer' = $s.'À confirmer'.Constats; 'Inventaire' = "$($e.Etat)$(if (-not $r.InventaireComplet) { ' · incomplet' })" })
+    $nbEol = @(Lire-Csv (Join-Path $d 'dotnet.csv') | Where-Object HorsSupport -eq 'OUI').Count
+    $lignes.Add([pscustomobject]@{ Serveur = $e.Serveur; 'Version SEAL' = $r.VersionSeal; 'CVE SEAL' = $s.'Dépendance SEAL'.CVE; 'Critiques' = $s.'Dépendance SEAL'.Critique; 'KEV' = "SEAL $($s.'Dépendance SEAL'.KEV) · env. $($s.'Environnement'.KEV)"; 'Environnement' = $s.'Environnement'.Constats; 'Runtimes hors support' = $nbEol; 'À confirmer' = $s.'À confirmer'.Constats; 'Inventaire' = "$($e.Etat)$(if (-not $r.InventaireComplet) { ' · incomplet' })" })
     if ($s.'Dépendance SEAL'.Critique -or $s.'Dépendance SEAL'.KEV -or $s.'Environnement'.KEV) { $statut = 'CRITIQUE' } elseif (($s.'Dépendance SEAL'.Constats -or $s.'Environnement'.Constats) -and $statut -eq 'OK') { $statut = 'ATTENTION' }
     $prio = @(Lire-Csv (Join-Path $d 'inventaire.csv') | Where-Object { $_.'Catégorie' -eq 'Dépendance SEAL' } | Sort-Object @{ e = { @{ 'Critique' = 4; 'Haute' = 3; 'Moyenne' = 2; 'Basse' = 1 }[$_.'Gravité max'] }; Descending = $true }, @{ e = { [int]$_.CVE }; Descending = $true } | Select-Object -First 8)
     $eol = @(Lire-Csv (Join-Path $d 'dotnet.csv') | Where-Object HorsSupport -eq 'OUI')
     $sections += New-OmsSection "$($e.Serveur) : dépendances SEAL à mettre à jour" (New-OmsTable @($prio | Select-Object Composant, Version, CVE, 'Gravité max', 'Version cible', 'Modules SEAL') @('Composant', 'Version', 'CVE', 'Gravité max', 'Version cible', 'Modules SEAL') 'Aucune dépendance SEAL concernée.') "Collecte du $($r.DateCollecte) · analyse du $($r.Genere)$(if ($eol.Count) { " · runtimes .NET hors support : $((@($eol | ForEach-Object { "$($_.Runtime -replace '^Microsoft\.', '') $($_.Version)" }) | Select-Object -Unique) -join ', ')" })"
   }
-  $corps = (New-OmsSection 'Synthèse par serveur' (New-OmsTable $lignes.ToArray() @('Serveur', 'Version SEAL', 'CVE SEAL', 'Critiques', 'Environnement', 'À confirmer', 'Inventaire')) 'CVE SEAL : dépendances livrées par SEAL. Environnement : runtimes .NET et .NET Framework du serveur (KB vérifiés via MSRC). Détail : synthèse et annexes PowerPoint jointes.') + $sections
+  $corps = (New-OmsSection 'Synthèse par serveur' (New-OmsTable $lignes.ToArray() @('Serveur', 'Version SEAL', 'CVE SEAL', 'Critiques', 'KEV', 'Environnement', 'Runtimes hors support', 'À confirmer', 'Inventaire')) 'CVE SEAL : dépendances livrées par SEAL. Environnement : runtimes .NET et .NET Framework du serveur (KB vérifiés via MSRC). Détail : synthèse et annexes PowerPoint jointes.') + $sections
   $html = New-OmsReportHtml -Title 'SEAL CVE - rapport hebdomadaire' -Subtitle "Semaine du $((Get-Date).AddDays(-6).ToString('dd/MM')) au $((Get-Date).ToString('dd/MM/yyyy'))" -Status $statut -Summary "$(@($lignes | Where-Object { $_.'Version SEAL' }).Count) serveur(s) analysé(s) · $(@($etatServeurs | Where-Object { -not $_.Rapport }).Count) sans rapport." -Body $corps -Footer 'SEAL CVE - moteur 3.0 (OSV, NVD, MSRC, CISA KEV)'
   $archive = Save-OmsReportArchive 'SEAL-CVE_hebdo' $html
   JL "Rapport hebdomadaire archivé : $archive ($($pj.Count) pièce(s) jointe(s))"
@@ -125,11 +136,12 @@ JL "=== fin du passage $Mode"
 
 
 
+
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDy9XuL7Wmw/IOS
-# u43orqEAXBedRLdEmqR2UuLD2CEKVaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCAOVFlcTy3CdlbS
+# E+l265X/yHOZxmYTL3JKE70W5aHutaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -169,12 +181,12 @@ JL "=== fin du passage $Mode"
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgcVhup5cB8WzVNUSyBflVfJC0
-# f+zz7pw6Ug36R0zeW04wDQYJKoZIhvcNAQEBBQAEggEAkrAiJlXaCf0+UPx6xX3+
-# iWDD1om8YU4h4iO9+MvNlN0MxxM4BC0oyJDK98lUzhhgGdD37LnBAjs/RKlYBcaq
-# e33J/g/uCN3/VbVVf+KKSKb9xGPRce5HZMCyVQsNPd4J/9DG76MUrlMmjbm3FMxB
-# YmE9K0NboFtYSFNrtp/adRvPsvO3GaOT9LS4/JTmsCXhb8XK+G40Yxd+s9FGZjOT
-# CoTlEo1Fw/YnTxn3FE9sJHAhQLpiyTM25KknI//6Wu9lIJUWXIalaVB19ljrBNH/
-# 9ypwP+ARXjLIWRK2AOSnoZ0vCds4L7C8gpR5P1VxbABmlVv+Z6h+KnTTImTfFpZk
-# Gw==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg+LmZS8ttNeEV8c6fweFPHYwJ
+# j3YZQQJPPKwC95WD3QUwDQYJKoZIhvcNAQEBBQAEggEAqVbJ86tOnSV47G55Cyni
+# /EqgPy5QchMXrriIBaisAXbmP8zeH8JeLhGKjeQy1nmqITE7YcSR5Jl+4yyizIKI
+# cXNlFqleaelBeMoY3U4HEOPfY9c2uQioYm9xYXEjrQLrT5id62adrvYY4pXbcTFQ
+# /75WBKtvaYkoyfI5NEbujqnkcvlGEgm3guMARFGSVeaW8hoq1vdPh0Y6ySxLGS2C
+# VNsR05yuHq4Zo8dBlDdZQeCP6uKNFRbnqUJwqSCtRWzk3gFFZe43I4InuQGebtYZ
+# bhn38h9ir+WNGMZIvSqtpmEXn6CYwCpddiaeA0E0nq34xaNhxJGRx96BlSCCvGJK
+# AQ==
 # SIG # End signature block

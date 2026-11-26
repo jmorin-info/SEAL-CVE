@@ -18,7 +18,7 @@
 [CmdletBinding()]
 param(
   [pscredential]$Credential,
-  [string[]]$Fichiers = @('Get-SealCveReport.ps1', 'New-SealCvePresentation.ps1', 'Invoke-SealCvePlanifie.ps1', 'Signer-SealProjet.ps1'),
+  [string[]]$Fichiers = @('Get-SealCveReport.ps1', 'New-SealCvePresentation.ps1', 'Invoke-SealCvePlanifie.ps1', 'Signer-SealProjet.ps1', 'Tests\Test-SealCve.ps1'),
   [string]$Serveur = 'BX-AD-01-IT-VM',
   [ValidatePattern('^[0-9A-Fa-f]{40}$')][string]$Empreinte = '05D07192E5128A0F3ECB1C94A6279C121B477D28'
 )
@@ -46,11 +46,11 @@ try {
   }
   $echecs = @($etats | Where-Object { $_ -notlike '*|Valid' }); if ($echecs.Count) { throw "Signature refusée : $($echecs -join ', ')" }
   New-Item -ItemType Directory $local | Out-Null
-  foreach ($f in $Fichiers) { Copy-Item (Join-Path $distant $f) -Destination $local -FromSession $session }
-  foreach ($f in $Fichiers) { $s = Get-AuthenticodeSignature (Join-Path $local $f); if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -ne $Empreinte) { throw "Signature invalide après transfert : $f ($($s.Status))" } }
+  foreach ($f in $Fichiers) { Copy-Item (Join-Path $distant (Split-Path $f -Leaf)) -Destination $local -FromSession $session }
+  foreach ($f in $Fichiers) { $s = Get-AuthenticodeSignature (Join-Path $local (Split-Path $f -Leaf)); if ($s.Status -ne 'Valid' -or $s.SignerCertificate.Thumbprint -ne $Empreinte) { throw "Signature invalide après transfert : $f ($($s.Status))" } }
   $sauvegarde = Join-Path $projet ('Sauvegardes\signature_' + (Get-Date -Format 'yyyyMMdd_HHmmss'))
   New-Item -ItemType Directory -Force $sauvegarde | Out-Null
-  foreach ($f in $Fichiers) { Copy-Item (Join-Path $projet $f) -Destination $sauvegarde; Copy-Item (Join-Path $local $f) -Destination (Join-Path $projet $f) -Force }
+  foreach ($f in $Fichiers) { Copy-Item (Join-Path $projet $f) -Destination $sauvegarde; Copy-Item (Join-Path $local (Split-Path $f -Leaf)) -Destination (Join-Path $projet $f) -Force }
   foreach ($f in $Fichiers) { $s = Get-AuthenticodeSignature (Join-Path $projet $f); Write-Host ('{0,-32} {1}' -f $f, $s.Status) }
   Write-Host "Versions précédentes : $sauvegarde"
 }
@@ -61,11 +61,12 @@ finally {
 }
 
 
+
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCDyGpJ31rUeSEfy
-# fPH4FbS+TOvwIYGHT07+4CZgQzHgdaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCA+rUj4Dyo+2jgL
+# zIsDPHV+fqN+OhhCGClO1nxPzsjINqCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -105,12 +106,12 @@ finally {
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgLqABHrMd7lvGD8KSF0Zp1pBK
-# CEetfRhWqeo2R+C+jAswDQYJKoZIhvcNAQEBBQAEggEADVBMvWxuIFc3xPmlOwdx
-# elrKlCtr5bA8RaLlHQJh/sFBGsL7zSwbu13DI0pXkxP+YlbL0wlRiebK38BwkAMG
-# aLLMulEGx5G3YLJLkQG1oaYTnQKNeNCosNWbc2C0Uk1LX5WxSyIWRY86gSlKPM+y
-# NHIKAVdtL1oTptNsvwfhuNJxoGniUyOM+yO8pwlgGOnq6yPKA/XaQcTTL+ngXAz/
-# yXmmo7w2gmUJKknLtdR4W6GYnsItZ9Z75uXf5y88dA8zl/b/nvkBoxJJKiLOvqde
-# G2bcEDHBRrgU4gW452IjNWWBuHQhoTXnaFrYcoC02OBjayoXrnpBq8OFJmcuqtf3
-# xg==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg1AXug4f1ZoCR3SSc7awUcNcW
+# WPxyee9NKyJeplAZosQwDQYJKoZIhvcNAQEBBQAEggEAiP+JKAqmtI+Qa1VuoV+8
+# Uqhe+iG3hTiAnF76kdtcjQ0ptxxI4GFjG6Z9JqgDhErCUFrSRQrjCjBEKLlEaLr8
+# 36osG3Gizo+WP27kv/IyhI9HBQD6ZZw1heyP/Rcz9dvI5jWgnbiSOEoGlto3ouJf
+# kk3z3e4Zq0hKNjiA0JGykrAvrIg90IB3gjjQwRGZ6p5U6bp/79FFaEUqVlsqv0Hr
+# glO39Fj1h7/rcS6qDLvQ08k09SwTsXSsgyGvITa8Aww3erZlXn3HxmYZlO94dBHp
+# 1Z+EMfo0NBWeVTx2PrsvpKroFg/t98av4vJoHjwpUhLElUtT3zqZKYgnMWGbkIMF
+# Uw==
 # SIG # End signature block

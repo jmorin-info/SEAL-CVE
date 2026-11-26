@@ -19,6 +19,7 @@ Compatible Windows PowerShell 5.1 et PowerShell 7. Les scripts sont signés (cer
 | `Invoke-SealCvePlanifie.ps1` | Orchestration planifiée sur le DC : analyse quotidienne, rapport hebdomadaire par mail |
 | `planification.exemple.json` | Modèle de configuration de la planification (serveurs, dépôt, destinataires) |
 | `Signer-SealProjet.ps1` | Signature des scripts sur le serveur de signature après modification |
+| `Tests\Test-SealCve.ps1` | Tests de non-régression (lecture des exports, cohérence des rapports) |
 | `Livraison\<version>` | Exports de build par version (Dependencies.zip, Licences.zip), non versionnés |
 | `Rapports\SEAL_<version>_<source>\<date>` | Rapports horodatés (un dossier par exécution), non versionnés |
 | `Cache\` | Cache des référentiels (OSV, NVD, MSRC, KEV), supprimable |
@@ -47,7 +48,7 @@ Compatible Windows PowerShell 5.1 et PowerShell 7. Les scripts sont signés (cer
 Pour passer une liste (`-Runtimes`, `-RacineInstallation`) depuis un raccourci, utiliser
 `powershell -Command "& '.\Get-SealCveReport.ps1' …"` : avec `-File`, les virgules ne sont pas interprétées.
 
-## Règles d'analyse (moteur 3.0)
+## Règles d'analyse (moteur 3.1)
 
 **Périmètre.** *SEAL* = dépendances livrées ou déployées par SEAL (NuGet, npm, bibliothèques C++, runtime inclus dans
 une application autonome). *Environnement* = runtimes .NET et .NET Framework installés sur le serveur.
@@ -62,8 +63,13 @@ une application autonome). *Environnement* = runtimes .NET et .NET Framework ins
 | Corrigée / non applicable | CVE .NET Framework corrigée par un KB installé (ou un cumulatif ultérieur), ou produit absent de l'avis MSRC pour cet OS | Non |
 | Non couvert (inventaire) | Composant sans référentiel CVE public (DLL propriétaires, SDK tiers, DLL Windows) | Non : « non couvert » ≠ « sans vulnérabilité » |
 
+**Mois.** Chaque constat est classé au mois de **publication de la CVE** (fiche CVE d'OSV, alignée sur la NVD), quel que
+soit l'écosystème ; un avis GitHub peut être publié ou relu des mois plus tard (colonne « Publication avis »). À défaut
+de CVE, la date de l'avis est utilisée.
+
 **Comptage.** Un constat = une CVE (ou un avis sans CVE) × un composant × une version. Les CVE distinctes sont
-dédoublonnées par identifiant. Un score CVSS absent est affiché « n.r. » (jamais 0) ; la gravité vient alors de l'avis.
+dédoublonnées par identifiant. Un score CVSS absent, ou nul (vecteur sans impact publié en attente d'évaluation), est affiché « n.r. » (jamais 0) ;
+la gravité vient alors de l'avis.
 
 **Version cible.** Plus petite version qui corrige tous les avis connus de la version installée. Si un avis n'a pas de
 correction publiée : « À vérifier ». À valider avec les tests SEAL avant déploiement.
@@ -80,7 +86,7 @@ l'environnement .NET est évalué sur les serveurs. Des runtimes relevés à par
 de titre, avec pour chaque module la couverture restante (liste de licences dédiée = couverture partielle sans graphe).
 
 **Historique.** Chaque exécution crée un sous-dossier daté. Un rapport n'est comparé au précédent (nouveaux / disparus)
-que s'il provient du même moteur et de la même source ; sinon aucune évolution n'est calculée.
+que s'il provient de la même version majeure du moteur (3.x) et de la même source ; sinon aucune évolution n'est calculée.
 
 **Contrôles.** Le moteur vérifie la cohérence des compteurs (catégories, mois, inventaire) dans `controles.csv` ; le
 générateur PowerPoint les recontrôle et refuse de produire une présentation incohérente.
@@ -120,8 +126,22 @@ générateur PowerPoint les recontrôle et refuse de produire une présentation 
 - Mails : module commun `C:\DC\Scripts\_Commun\OMS-ReportCommon.ps1` (charte et relais SMTP du DC) ; copie
   archivée dans `C:\DC\Rapports`. Journaux : `Journaux\` (90 jours). Clé NVD : secret DPAPI déjà présent sur le DC.
 - Un inventaire non reçu depuis 48 h et un serveur désactivé sont signalés dans le mail hebdomadaire.
+- Authenticité : le partage de collecte étant accessible en écriture aux ordinateurs du domaine, un inventaire n'est
+  analysé que s'il appartient au compte ordinateur du serveur (`DOMAINE\SERVEUR$`) et porte son nom ; sinon il est
+  rejeté et signalé.
+- Le cache des référentiels est purgé au-delà de 30 jours (les dates de publication des CVE sont conservées).
 - Ajouter un serveur : copier `Get-SealCveReport.ps1` dans `C:\ProgramData\OMNITECH\SEAL-CVE` du serveur,
   créer la tâche de collecte (même commande), puis l'ajouter à `planification.json`.
+
+## Tests
+
+```powershell
+.\Tests\Test-SealCve.ps1                                   # livraison fictive (sans réseau) + rapports locaux
+.\Tests\Test-SealCve.ps1 -Rapports 'C:\DC\Applications\SEAL-CVE\Rapports'
+```
+
+Lecture des exports (UTF-16, export vide, formats de licences, exclusions, natifs, dépôt) et cohérence de chaque
+rapport (compteurs = CSV, mois, doublons, catégories, CVSS jamais à 0, contrôles du moteur). Code de sortie = échecs.
 
 ## Sources
 

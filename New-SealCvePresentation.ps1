@@ -1,7 +1,7 @@
 ﻿<#
 .SYNOPSIS
   Génère la synthèse et les annexes PowerPoint « SEAL <version> : CVE des dépendances » à partir d'un rapport de
-  Get-SealCveReport.ps1 (moteur 3.0).
+  Get-SealCveReport.ps1 (moteur 3.x).
 
 .DESCRIPTION
   Écrit directement les fichiers .pptx (Open XML) : aucun Office requis, utilisable sur un serveur ou dans une tâche
@@ -39,7 +39,7 @@ function Num($v) { $s = "$v".Trim() -replace ',', '.'; $r = 0.0; if ($s -and [do
 function CleV([string]$v) { $p = @(([regex]::Match($v, '\d+(\.\d+){0,3}').Value).Split('.') | Where-Object { $_ }); while ($p.Count -lt 4) { $p += '0' }; try { [version]($p[0..3] -join '.') } catch { [version]'0.0.0.0' } }
 function Lire([string]$n) { $f = Join-Path $Rapport $n; if (Test-Path $f) { @(Import-Csv $f -Delimiter ';' -Encoding UTF8) } else { @() } }
 $Resume = Get-Content (Join-Path $Rapport 'resume.json') -Raw -Encoding UTF8 | ConvertFrom-Json
-if ("$($Resume.VersionMoteur)" -ne '3.0') { throw "Rapport produit par le moteur $($Resume.VersionMoteur) : relancer Get-SealCveReport.ps1 (moteur 3.0) pour obtenir un rapport comparable." }
+if ("$($Resume.VersionMoteur)" -notmatch '^3\.') { throw "Rapport produit par le moteur $($Resume.VersionMoteur) : relancer Get-SealCveReport.ps1 (moteur 3.x) pour obtenir un rapport comparable." }
 $Constats = Lire 'cve-detail.csv'; $Inventaire = Lire 'inventaire.csv'; $Dotnet = Lire 'dotnet.csv'; $Disparus = Lire 'cve-disparues.csv'
 $ExportsRap = Lire 'exports.csv'; $Diags = @(Lire 'diagnostic.csv' | Where-Object { $_.Niveau -ne 'Information' })
 $Seal = @($Constats | Where-Object { $_.'Catégorie' -eq 'Dépendance SEAL' })
@@ -255,14 +255,14 @@ if ($Synthese) {
     [void](Texte $sl "$($kpi[$i][0])" $x ($y + 12) 134 52 36 -Gras $kpi[$i][2] 2 'Cambria')
     [void](Texte $sl $kpi[$i][1] ($x + 8) ($y + 70) 118 34 12 -align 2)
   }
-  [void](Texte $sl "Hors de ces chiffres : environnement serveur $($Pc.'Environnement'.Constats) constat(s) · à confirmer $($Pc.'À confirmer'.Constats) · corrigés ou non applicables $($Pc.'Corrigée / non applicable'.Constats) · non couverts $($Resume.NonCouverts) composant(s)" 43 352 430 48 12 -coul $Gris -Italique)
+  [void](Texte $sl "Hors de ces chiffres : environnement serveur $($Pc.'Environnement'.Constats) constat(s)$(if ($Pc.'Environnement'.KEV) { " (dont $($Pc.'Environnement'.KEV) CVE KEV)" }) · à confirmer $($Pc.'À confirmer'.Constats) · corrigés ou non applicables $($Pc.'Corrigée / non applicable'.Constats) · non couverts $($Resume.NonCouverts) composant(s)" 43 352 430 48 12 -coul $Gris -Italique)
   $msgs = New-Object Collections.Generic.List[object]
   if (-not $Resume.InventaireComplet) { $msgs.Add(@('Inventaire incomplet', "$($Resume.ExportsVides) export(s) de dépendances vide(s) : la couverture de ces modules repose sur des listes de licences ou n'est pas démontrée.", $Rouge)) }
   foreach ($g in @($vulnSeal | Sort-Object @{ e = { $Rang[$_.'Gravité max'] }; Descending = $true }, @{ e = { [int]$_.CVE }; Descending = $true } | Group-Object Composant | Select-Object -First 3)) {
     $c = $g.Group[0]; $cib = if ($c.'Version cible') { $c.'Version cible' } else { 'à déterminer' }
     $msgs.Add(@("$($g.Name) $(@($g.Group.Version) -join ', ')", "$((@($g.Group.CVE) | ForEach-Object { [int]$_ } | Measure-Object -Sum).Sum) CVE, gravité max $($c.'Gravité max')$(if ($c.'CVSS max') { " (CVSS $($c.'CVSS max'))" }). Cible : $cib.", $Orange))
   }
-  if ($eol.Count) { $msgs.Add(@('Environnement : runtimes .NET hors support', (((@($eol | ForEach-Object { "$($_.Runtime -replace '^Microsoft\.', '') $($_.Version)" } | Select-Object -Unique)) -join ', ') + '. Hors périmètre SEAL, mais à traiter sur le serveur.'), $Bleu)) }
+  if ($eol.Count) { $msgs.Add(@('Environnement : runtimes .NET hors support', (((@($eol | ForEach-Object { "$($_.Runtime -replace '^Microsoft\.', '') $($_.Version)" } | Select-Object -Unique)) -join ', ') + '. Hors périmètre SEAL, mais à traiter sur le serveur.' + $(if ($Pc.'Environnement'.KEV) { " Dont $($Pc.'Environnement'.KEV) CVE exploitée(s) activement (KEV)." } else { '' })), $Bleu)) }
   $y = 95
   for ($k = 0; $k -lt [math]::Min(5, $msgs.Count); $k++) { $m = $msgs[$k]; $y += (Bloc $sl $m[0] $m[1] 500 $y 418 $m[2]) + 12; if ($y -gt 440) { break } }
 
@@ -274,7 +274,7 @@ if ($Synthese) {
   $y += (Bloc $sl 'Lecture' 'Dépendance SEAL : composant livré par SEAL, identité exacte. Environnement : runtimes et .NET Framework du serveur. À confirmer : identité ou applicabilité non démontrée. Corrigée / non applicable : KB .NET installé ou produit absent de l''avis.' 660 $y 258 $Navy 11) + 10
   $etatExports = if ($Resume.InventaireComplet) { "$($Resume.ExportsLus) export(s) lus, aucun vide." } else { "$($Resume.ExportsLus) export(s) lus, $($Resume.ExportsVides) vide(s) ou invalide(s)." }
   $y += (Bloc $sl 'Couverture des exports' $etatExports 660 $y 258 $(if ($Resume.InventaireComplet) { $Navy } else { $Rouge }) 11) + 10
-  $comp = if (-not $Resume.RapportPrecedent) { 'Premier rapport de cette source avec le moteur 3.0.' } elseif ($Resume.HistoriqueComparable) { "Comparé au rapport $($Resume.RapportPrecedent) : $($Resume.Nouvelles) nouveau(x), $($Resume.Disparues) disparu(s)." } else { "Rapport précédent $($Resume.RapportPrecedent) non comparable (autre moteur ou autre source) : aucune évolution n'est calculée." }
+  $comp = if (-not $Resume.RapportPrecedent) { "Premier rapport de cette source avec le moteur $($Resume.VersionMoteur)." } elseif ($Resume.HistoriqueComparable) { "Comparé au rapport $($Resume.RapportPrecedent) : $($Resume.Nouvelles) nouveau(x), $($Resume.Disparues) disparu(s)." } else { "Rapport précédent $($Resume.RapportPrecedent) non comparable (autre moteur ou autre source) : aucune évolution n'est calculée." }
   [void](Bloc $sl 'Historique' $comp 660 $y 258 $Navy 11)
   [void](Texte $sl "Non couvert : $($Resume.NonCouverts) composant(s) sans référentiel CVE public (voir annexe E). « Non couvert » ne signifie pas « sans vulnérabilité »." 43 (82 + 20 * 5 + 8) 600 30 10.5 -coul $Gris -Italique)
   $partiels = @($ExportsRap | Where-Object { $_.Etat -ne 'Lu' })
@@ -352,7 +352,8 @@ if ($Synthese) {
   }
   if ($Dotnet.Count -or $fw.Count) {
     $sl = Diapo 'Environnement serveur : runtimes .NET et .NET Framework'
-    $rows = @($Dotnet | Sort-Object Runtime, { CleV $_.Version } | Select-Object -First 13 | ForEach-Object { , @(@{ T = (Court $_.Runtime); B = $true }, $_.Version, $_.Usage, $(if ($_.HorsSupport -eq 'OUI') { @{ T = "$($_.FinSupport) HORS SUPPORT"; C = $Rouge; B = $true } } else { $_.FinSupport }), @{ T = $_.CVE; A = 2 }, $(if ($_.HorsSupport -eq 'OUI') { 'Migrer vers une branche LTS supportée' } else { $_.Commentaire })) })
+    $kevRt = @{}; foreach ($l in $EnvSrv | Where-Object { $_.KEV -eq 'OUI' }) { $kevRt["$($l.Composant)|$($l.'Version installée')"] = $true }
+    $rows = @($Dotnet | Sort-Object Runtime, { CleV $_.Version } | Select-Object -First 13 | ForEach-Object { , @(@{ T = (Court $_.Runtime); B = $true }, $_.Version, $_.Usage, $(if ($_.HorsSupport -eq 'OUI') { @{ T = "$($_.FinSupport) HORS SUPPORT"; C = $Rouge; B = $true } } else { $_.FinSupport }), $(if ($kevRt.ContainsKey("$($_.Runtime)|$($_.Version)")) { @{ T = "$($_.CVE) KEV"; A = 2; B = $true; C = $Rouge } } else { @{ T = $_.CVE; A = 2 } }), $(if ($_.HorsSupport -eq 'OUI') { 'Migrer vers une branche LTS supportée' } else { $_.Commentaire })) })
     if ($rows.Count) { [void](Tableau $sl @('Runtime', 'Version', 'Usage par SEAL', 'Fin de support', 'CVE', 'Action') $rows 43 82 @(150, 65, 190, 140, 40, 290) 9.5) }
     if ($fw.Count) {
       $yb = 82 + 20 * ($rows.Count + 1) + 20
@@ -417,7 +418,7 @@ if ($Synthese) {
   $sl = Diapo 'Méthode et règles d''analyse'
   $cols = @(@('Inventaire', "Source : $sourceTxt.`rExports Dependencies / Licences, *.deps.json, packages.config, runtimeconfig.json, DLL tierces ; pour un serveur : runtimes, .NET Framework, OS et correctifs installés."),
     @('Vulnérabilités', "OSV.dev (GitHub Advisory) : NuGet, npm, runtimes .NET.`rNVD : bibliothèques C++, .NET Framework.`rMSRC : KB .NET Framework par OS.`rCISA KEV, endoflife.date."),
-    @('Règles', "Constat = CVE × composant × version.`rLes chiffres clés portent sur les dépendances SEAL ; l'environnement serveur est présenté à part.`rCVSS absent = « n.r. », jamais 0.`rComparaison uniquement entre rapports du même moteur et de la même source."))
+    @('Règles', "Constat = CVE × composant × version ; mois = publication de la CVE.`rLes chiffres clés portent sur les dépendances SEAL ; l'environnement serveur est présenté à part.`rCVSS absent = « n.r. », jamais 0.`rComparaison uniquement entre rapports du même moteur et de la même source."))
   for ($k = 0; $k -lt 3; $k++) { $x = 43 + $k * 295; [void](Boite $sl $x 85 280 300); [void](Bloc $sl $cols[$k][0] $cols[$k][1] ($x + 14) 97 252 $Navy 12) }
   [void](Texte $sl "Détail complet : annexes PowerPoint, rapport.html, cve-detail.csv, inventaire.csv, exports.csv, controles.csv ($Rapport)" 43 405 875 30 11 -coul $Gris -Italique)
   $fichiers += Enregistrer 'synthese'
@@ -448,11 +449,12 @@ $fichiers
 
 
 
+
 # SIG # Begin signature block
 # MIIJXQYJKoZIhvcNAQcCoIIJTjCCCUoCAQExDzANBglghkgBZQMEAgEFADB5Bgor
 # BgEEAYI3AgEEoGswaTA0BgorBgEEAYI3AgEeMCYCAwEAAAQQH8w7YFlLCE63JNLG
-# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCC5Iomm0gXSn/TF
-# K2dTeDGpQ6L8xI1DK1N/WFJPMscgcaCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
+# KX7zUQIBAAIBAAIBAAIBAAIBADAxMA0GCWCGSAFlAwQCAQUABCClEIxdEN4n1JPW
+# Uk2uqHom8ehz14zcoQCr1vs1ZYW6+qCCBpIwggaOMIIFdqADAgECAhNVAABq4hV6
 # 9PdbzYf+AAAAAGriMA0GCSqGSIb3DQEBCwUAMFgxGDAWBgoJkiaJk/IsZAEZFghz
 # ZWN1cml0eTEYMBYGCgmSJomT8ixkARkWCG9tbml0ZWNoMSIwIAYDVQQDExlSb290
 # IENBIE9NTklURUNIIFNFQ1VSSVRZMB4XDTI2MDcwMjA5MjkxNloXDTI4MDcwMjA5
@@ -492,12 +494,12 @@ $fichiers
 # IjAgBgNVBAMTGVJvb3QgQ0EgT01OSVRFQ0ggU0VDVVJJVFkCE1UAAGriFXr091vN
 # h/4AAAAAauIwDQYJYIZIAWUDBAIBBQCggYQwGAYKKwYBBAGCNwIBDDEKMAigAoAA
 # oQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgorBgEEAYI3AgELMQ4w
-# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQgtCpHKdjfqZxPKaOmD8TfN6jA
-# xDk7x2ZB0nVup6L6hHowDQYJKoZIhvcNAQEBBQAEggEAtSwRuiijOMNSvk6DuHne
-# Ylv1OM5xsLfS1M4CXj5MMdiqkHu5qJLpvex6MC+lU9ZLDeeak3XpfBSbSr8qxZuZ
-# csQYP4i5DM6DNiLiycXzoFkpBxc4cSC1eDeP3DOGFUHe1dsgAvJFVg6kf47l9CXJ
-# dTeQYD7va9vh5g+mQJ1UAxRWSYcSOW6rXVHzKCUcY1vxzrwl9NXB9Bsve5jRyYo2
-# ogBbfU8NtvwIi4Od6jZ1h2VSxx0HH8BuDsgiXUTx3nOq29z1djH7qj0LB13QB70u
-# JJHxLZsyXKoUdPcNX8RQYRx1M5etJvtl+mYDUpRxFlsAeu8OZfLMpt1xqhFb9lou
-# yg==
+# DAYKKwYBBAGCNwIBFTAvBgkqhkiG9w0BCQQxIgQg4nmKooa9qPaEuLiGA6SH2Axg
+# 50Yn83S+LXpg8llxo4YwDQYJKoZIhvcNAQEBBQAEggEALdhzs2EdbKNHsbzxMHZZ
+# qKt2A6VTW9n6JjTatyF5+58SF2UVyec7jsLs7oSb5XFzFQUiKRQa8OZYPwAMWPmM
+# S6mJlaBdqFnP4f/HzTMh22mOiBbEQGG7z2HBgByllChud6ya2yyS90GcCZzbLHRT
+# auTZsdqupJRHZj8P/BrlLeoUBmBRUkkaU9AYJdlHm/BeqO1hMn+u+GSRD3koaID7
+# edsYoNsJisY1szRhUjxFsNeXRe1DS7sMsdxEwRpPYYe5ZF79Lwu1uGHy8UFJICnh
+# OYC0tcjoEdy5TokZQn0uOXc15W4Sgyy21eue7EUEN0ORngBTQZGmrFJbcWoUrss9
+# Jw==
 # SIG # End signature block
